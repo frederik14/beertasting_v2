@@ -36,7 +36,7 @@ The database stays normalized. The client gets a de-normalized snapshot when nee
 - beers
 - tasting_beers
 - scores
-- tasting_snapshots
+- tenant_invites
 
 ## Key rules
 
@@ -60,120 +60,49 @@ This makes ranking logic easy to test and evolve without schema churn.
 
 ## Database schema direction
 
-```sql
-create table public.tenants (
-  id uuid primary key default gen_random_uuid(),
-  name text not null,
-  slug text not null unique,
-  created_at timestamptz not null default now()
-);
+The canonical schema is `supabase/migrations/202610200001_init.sql`; the
+consolidated, idempotent copy is `supabase/schema.sql`. It is not duplicated in
+this plan to avoid drift. At a glance:
 
-create table public.profiles (
-  id uuid primary key references auth.users(id) on delete cascade,
-  full_name text,
-  avatar_url text,
-  created_at timestamptz not null default now()
-);
-
-create table public.tenant_members (
-  id uuid primary key default gen_random_uuid(),
-  tenant_id uuid not null references public.tenants(id) on delete cascade,
-  user_id uuid not null references public.profiles(id) on delete cascade,
-  role text not null default 'member' check (role in ('owner', 'admin', 'member')),
-  created_at timestamptz not null default now(),
-  unique (tenant_id, user_id)
-);
-
-create table public.tastings (
-  id uuid primary key default gen_random_uuid(),
-  tenant_id uuid not null references public.tenants(id) on delete cascade,
-  host_user_id uuid not null references public.profiles(id),
-  title text not null,
-  description text,
-  tasting_date timestamptz not null default now(),
-  status text not null default 'draft' check (status in ('draft', 'active', 'completed')),
-  created_at timestamptz not null default now()
-);
-
-create table public.tasting_participants (
-  id uuid primary key default gen_random_uuid(),
-  tasting_id uuid not null references public.tastings(id) on delete cascade,
-  user_id uuid references public.profiles(id),
-  display_name text not null,
-  is_host boolean not null default false,
-  unique (tasting_id, user_id),
-  unique (tasting_id, display_name)
-);
-
-create table public.beers (
-  id uuid primary key default gen_random_uuid(),
-  tenant_id uuid not null references public.tenants(id) on delete cascade,
-  name text not null,
-  brewery text,
-  style text,
-  alcohol numeric(4,2),
-  description text,
-  created_at timestamptz not null default now(),
-  unique (tenant_id, name)
-);
-
-create table public.tasting_beers (
-  id uuid primary key default gen_random_uuid(),
-  tasting_id uuid not null references public.tastings(id) on delete cascade,
-  beer_id uuid not null references public.beers(id) on delete restrict,
-  position integer not null default 1,
-  unique (tasting_id, beer_id),
-  unique (tasting_id, position)
-);
-
-create table public.scores (
-  id uuid primary key default gen_random_uuid(),
-  tasting_id uuid not null references public.tastings(id) on delete cascade,
-  beer_id uuid not null references public.beers(id) on delete restrict,
-  participant_id uuid not null references public.tasting_participants(id) on delete cascade,
-  smell numeric(3,1),
-  color numeric(3,1),
-  branding numeric(3,1),
-  taste numeric(3,1),
-  notes text,
-  created_at timestamptz not null default now(),
-  unique (tasting_id, beer_id, participant_id)
-);
-
-create table public.tasting_snapshots (
-  id uuid primary key default gen_random_uuid(),
-  tasting_id uuid not null unique references public.tastings(id) on delete cascade,
-  snapshot jsonb not null,
-  generated_at timestamptz not null default now()
-);
-```
+- `tenants`, `profiles`, `tenant_members`, `tenant_invites`
+- `tastings`, `tasting_participants`
+- `beers`, `tasting_beers`
+- `scores`
+- `updated_at` on tenants, profiles, memberships, tastings, participants,
+  beers and scores
+- composite foreign keys so a score cannot reference a participant or beer from
+  another tasting
+- a trigger that prevents a `tasting_beers` row from crossing tenant boundaries
+- RLS helpers (`is_tenant_member`, `is_tasting_member`, `can_edit_participant`)
+- atomic RPCs for tenant creation, tasting creation, beer assignment, invites and
+  conflict-aware score saving
 
 ## Example client snapshot shape
 
 ```ts
 type TastingSnapshot = {
-  tenant: {
-    id: string
-    name: string
-    slug: string
-  }
+  tenant: { id: string; name: string; slug: string }
   tasting: {
     id: string
+    tenantId: string
+    hostUserId: string
     title: string
     status: 'draft' | 'active' | 'completed'
     date: string
+    createdAt: string
   }
   participants: Array<{
     id: string
     displayName: string
-    userId?: string | null
+    userId: string | null
+    isHost: boolean
   }>
   beers: Array<{
     id: string
     name: string
-    brewery?: string | null
-    style?: string | null
-    alcohol?: number | null
+    brewery: string | null
+    style: string | null
+    alcohol: number | null
   }>
   rows: Array<{
     participantId: string
@@ -182,42 +111,78 @@ type TastingSnapshot = {
     color: number | null
     branding: number | null
     taste: number | null
-    notes?: string | null
+    notes: string | null
+    updatedAt: string | null
   }>
 }
 ```
 
 ## Ranking logic
 
-The client should calculate rankings by loading a full snapshot and aggregating values:
-- score each beer per participant
-- compute the average of smell + color + branding + taste
-- aggregate per beer
-- sort descending by average score
+The client calculates rankings by loading a full snapshot and aggregating values:
+- a row counts only when smell, color, branding and taste are all present
+- smell/color/branding are 0–10; taste is 0–20 (double weight)
+- the row score is `(smell + color + branding + taste) × 2`, out of 100
+- aggregate per beer across complete row scores only
+- beers with no complete rows remain in the list as unranked
+- sort descending by average, then by votes, then by name
+- ties share a rank; the next distinct average skips positions
 
-This is the local-derived ranking model.
+A notes-only row is not a vote. It is reported separately as an incomplete vote.
+This is the local-derived ranking model and it is implemented in
+`src/lib/rankings.ts` with unit tests.
 
-## Planned app modules
+Per-tasting rankings include unrated beers as unranked rows. The tenant-wide
+overall ranking uses the same complete-row policy but aggregates across all
+tastings, omits beers with no complete ratings and adds:
 
-- `src/lib/supabase.ts` - Supabase client setup
+- per-criterion averages and a tasting count per beer
+- date, taster, type and text filters applied before aggregation
+- sortable columns, with rank still derived from the average score
+- a refresh action, plus automatic refresh after the user's own writes
+
+The group-wide data is fetched with pagination because PostgREST caps a single
+response at 1,000 rows by default and the imported data exceeds that.
+
+## App modules
+
+- `supabase/migrations/202610200001_init.sql` - canonical schema, RLS and RPCs
+- `supabase/schema.sql` - consolidated idempotent copy of the migration
+- `src/lib/supabase.ts` - Supabase client setup and env validation
+- `src/lib/api.ts` - typed queries, RPC calls and error formatting
 - `src/lib/types.ts` - domain types
+- `src/lib/database.types.ts` - database row and RPC types
 - `src/lib/rankings.ts` - local ranking functions
-- `src/data/mockSnapshot.ts` - local testing data
-- `src/App.tsx` - main dashboard shell
-- `src/App.css` - styling
+- `src/lib/snapshot.ts` - pure snapshot builder
+- `src/hooks/` - auth, tenant data, URL state, snapshot/realtime, overall ranking data
+- `src/components/` - auth, tenant, tasting, scoring, ranking, overall ranking and invite UI
+- `src/App.tsx` - app shell and orchestration
+- `src/data/mockSnapshot.ts` - demo fixture, no longer used by the live app
 
-## Next implementation steps
+## Completed implementation steps
 
-1. Create Supabase project and set env variables
-2. Run the SQL schema in Supabase
-3. Add auth flow with sign in / sign out
-4. Build tenant creation and membership UI
-5. Add tasting creation and participant management
-6. Add beer catalog / tasting beer assignment
-7. Add scoring forms for each participant
-8. Build snapshot generation and fetch logic
-9. Derive rankings in the client and render them
-10. Add tenant dashboard with multi-group switching
+1. Supabase project and env variables
+2. Idempotent SQL schema with RLS, composite integrity constraints and RPCs
+3. Auth flow with sign in / sign up / sign out / password reset
+4. Tenant creation, invites, membership and multi-group switching
+5. Tasting creation with automatic host participant
+6. Beer catalog / tasting beer assignment with server-side positions
+7. Scoring forms with own-score/admin permissions and completeness feedback
+8. Snapshot fetch with error propagation and stale-data handling
+9. Client-side rankings with complete-row policy and tests
+10. Realtime subscriptions with reconnect and visibility catch-up
+11. Optimistic concurrency via `updated_at` and conflict UI
+12. Invite join links and QR codes with idempotent acceptance
+13. Tenant-wide overall beer ranking with filters, sorting and paginated loading
+14. Strict TypeScript, Vitest and documentation
+
+## Follow-up work
+
+1. Add a member-management screen (list members, change roles, remove members).
+2. Replace copyable invite codes with transactional email invites.
+3. Wire the pgTAP RLS suite in `supabase/tests/rls.test.sql` into CI.
+4. Add a Playwright end-to-end test for the full tasting flow.
+5. Consider a shared calendar/export feature.
 
 ## Important app principles
 
@@ -229,5 +194,10 @@ This is the local-derived ranking model.
 
 ## Status
 
-The project scaffold is created and a first tenant-aware app structure is in place.
-The next work is to connect the app to Supabase and replace the mock snapshot with real data queries.
+The app is connected to Supabase. The live path uses RLS-protected tables, atomic
+RPCs for multi-row writes, an optimistic-concurrency score RPC and realtime
+snapshot refreshes. The mock snapshot is retained only as a demo fixture and is
+not used as a fallback in the live UI.
+
+The remaining work is primarily operational: automated RLS integration tests,
+end-to-end tests, email delivery for invites, and a member-management screen.

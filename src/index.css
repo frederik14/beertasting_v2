@@ -6,6 +6,7 @@
   background:
     radial-gradient(circle at top, rgba(174, 116, 31, 0.22), transparent 30%),
     linear-gradient(180deg, #121621 0%, #0d1018 100%);
+  color-scheme: dark;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
@@ -33,6 +34,11 @@ textarea {
   font: inherit;
 }
 
+:focus-visible {
+  outline: 2px solid #f0c66f;
+  outline-offset: 2px;
+}
+
 #root {
   min-height: 100vh;
 }
@@ -42,4 +48,10 @@ h2,
 h3,
 p {
   margin: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
 }
