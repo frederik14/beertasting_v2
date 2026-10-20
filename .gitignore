@@ -12,6 +12,16 @@ dist
 dist-ssr
 *.local
 
+# Supabase local CLI state
+supabase/.temp
+supabase/.branches
+
+# Cloudflare Wrangler local state
+.wrangler/
+
+# One-off legacy DynamoDB export used for the ZBL migration
+.legacy-export/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

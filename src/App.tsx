@@ -1,887 +1,840 @@
 import './App.css'
-import { useEffect, useMemo, useState } from 'react'
-import type { Session } from '@supabase/supabase-js'
-import { tastingSnapshot as fallbackSnapshot } from './data/mockSnapshot'
-import { deriveTastingRankings } from './lib/rankings'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { AuthPanel } from './components/AuthPanel'
+import { BeerForm } from './components/BeerForm'
+import { GroupActionsPanel } from './components/GroupActionsPanel'
+import { InvitePanel } from './components/InvitePanel'
+import { LoadingPanel } from './components/LoadingPanel'
+import { OverallRankingPanel } from './components/OverallRankingPanel'
+import { ParticipantForm } from './components/ParticipantForm'
+import { PasswordRecoveryPanel } from './components/PasswordRecoveryPanel'
+import { RankingPanel } from './components/RankingPanel'
+import { ScoreBoard } from './components/ScoreBoard'
+import { SnapshotSummary } from './components/SnapshotSummary'
+import { StatusBanner } from './components/StatusBanner'
+import { TastingPanel } from './components/TastingPanel'
+import { TenantSetup } from './components/TenantSetup'
+import { TenantSwitcher } from './components/TenantSwitcher'
+import { useAuthSession } from './hooks/useAuthSession'
+import { useTastingSnapshot } from './hooks/useTastingSnapshot'
+import { useTenantData } from './hooks/useTenantData'
+import { useTenantRealtime } from './hooks/useTenantRealtime'
+import { useUrlParam } from './hooks/useUrlParam'
 import {
-  addParticipantToTasting,
-  assignBeerToTasting,
-  createTastingForTenant,
-  createTenantForUser,
-  ensureProfile,
-  fetchCurrentTenant,
-  fetchLatestSnapshot,
-  fetchSnapshotForTasting,
-  fetchTenantTastings,
-  hasSupabaseConfig,
-  saveScoreRow,
-  supabase,
-  upsertBeerForTenant,
-} from './lib/supabase'
-import type { TastingSnapshot } from './lib/types'
+  acceptTenantInvite,
+  addBeerToTasting,
+  addParticipant,
+  createTasting,
+  createTenant,
+  createTenantInvite,
+  deleteTasting,
+  deleteTenantInvite,
+  fetchTastings,
+  fetchTenantInvites,
+  formatError,
+  removeBeerFromTasting,
+  removeParticipant,
+  saveScores,
+  updateTastingStatus,
+} from './lib/api'
+import { deriveTastingRankings } from './lib/rankings'
+import { hasSupabaseConfig, supabase, supabaseConfigError } from './lib/supabase'
+import type {
+  SaveScoreInput,
+  SaveScoreResult,
+  TastingStatus,
+  TastingSummary,
+  TenantInvite,
+  TenantRole,
+} from './lib/types'
 
 function App() {
-  const [session, setSession] = useState<Session | null>(null)
-  const [currentTenant, setCurrentTenant] = useState<{ id: string; name: string; slug: string } | null>(
-    null,
-  )
-  const [tenantTastings, setTenantTastings] = useState<Array<{ id: string; title: string; status: string; tasting_date: string }>>([])
-  const [selectedTastingId, setSelectedTastingId] = useState<string | null>(null)
-  const [snapshot, setSnapshot] = useState<TastingSnapshot>(fallbackSnapshot)
-  const [status, setStatus] = useState<'loading' | 'live' | 'fallback'>('loading')
-  const [error, setError] = useState<string | null>(null)
-  const [authMode, setAuthMode] = useState<'signIn' | 'signUp'>('signUp')
-  const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
-  const [tenantName, setTenantName] = useState('')
-  const [tenantSlug, setTenantSlug] = useState('')
-  const [tastingTitle, setTastingTitle] = useState('')
-  const [tastingDate, setTastingDate] = useState(new Date().toISOString().slice(0, 10))
-  const [participantName, setParticipantName] = useState('')
-  const [beerName, setBeerName] = useState('')
-  const [beerBrewery, setBeerBrewery] = useState('')
-  const [beerStyle, setBeerStyle] = useState('')
-  const [beerAlcohol, setBeerAlcohol] = useState('')
-  const [draftScores, setDraftScores] = useState<Record<string, { smell: string; color: string; branding: string; taste: string; notes: string }>>({})
-  const [busy, setBusy] = useState(false)
+  const {
+    session,
+    loading: authLoading,
+    error: authError,
+    recovery,
+    clearError: clearAuthError,
+    clearRecovery,
+    signIn,
+    signUp,
+    resetPassword,
+    updatePassword,
+    signOut,
+  } = useAuthSession()
 
-  const refreshSnapshot = async () => {
-    if (!supabase || !session) {
+  const userId = session?.user.id ?? null
+  const {
+    memberships,
+    loading: membershipsLoading,
+    error: membershipsError,
+    refresh: refreshMemberships,
+    clearError: clearMembershipsError,
+  } = useTenantData(userId)
+
+  const [tenantParam, setTenantParam] = useUrlParam('tenant')
+  const [tastingParam, setTastingParam] = useUrlParam('tasting')
+  const [joinParam, setJoinParam] = useUrlParam('join')
+
+  const [tastings, setTastings] = useState<TastingSummary[]>([])
+  const [tastingsLoading, setTastingsLoading] = useState(false)
+  const [tastingsError, setTastingsError] = useState<string | null>(null)
+  const [tastingsNonce, setTastingsNonce] = useState(0)
+
+  const [invites, setInvites] = useState<TenantInvite[]>([])
+  const [invitesError, setInvitesError] = useState<string | null>(null)
+  const [invitesNonce, setInvitesNonce] = useState(0)
+
+  const [scoreboardDirty, setScoreboardDirty] = useState(false)
+  const [tenantRankingSeed, setTenantRankingSeed] = useState(0)
+  const [joinError, setJoinError] = useState<string | null>(null)
+  const [joining, setJoining] = useState(false)
+  const joinProcessingRef = useRef(false)
+  const isJoining = Boolean(session && (joining || joinParam))
+  const loadedTenantIdRef = useRef<string | null>(null)
+  const loadedInviteTenantIdRef = useRef<string | null>(null)
+
+  const selectedMembership = useMemo(
+    () =>
+      memberships.find((membership) => membership.tenant.id === tenantParam) ??
+      memberships[0] ??
+      null,
+    [memberships, tenantParam],
+  )
+
+  const selectedTenant = selectedMembership?.tenant ?? null
+  const selectedRole: TenantRole | null = selectedMembership?.role ?? null
+
+  const selectedTasting = useMemo(
+    () => tastings.find((tasting) => tasting.id === tastingParam) ?? null,
+    [tastings, tastingParam],
+  )
+
+  const {
+    snapshot,
+    status: snapshotStatus,
+    error: snapshotError,
+    realtimeStatus,
+    refresh: refreshSnapshot,
+    clearError: clearSnapshotError,
+  } = useTastingSnapshot(selectedTasting?.id ?? null)
+
+  // A snapshot must belong to the tasting currently selected in the URL.
+  // This prevents a one-frame mismatch during a tasting switch from letting
+  // the user edit or rank the previous tasting's data.
+  const activeSnapshot = useMemo(
+    () =>
+      snapshot && selectedTasting && snapshot.tasting.id === selectedTasting.id
+        ? snapshot
+        : null,
+    [snapshot, selectedTasting],
+  )
+
+  const rankings = useMemo(
+    () => (activeSnapshot ? deriveTastingRankings(activeSnapshot) : []),
+    [activeSnapshot],
+  )
+
+  useEffect(() => {
+    if (session) return
+    setTastings([])
+    setInvites([])
+    setScoreboardDirty(false)
+    setJoining(false)
+    // Preserve tenant/tasting query parameters while a join link is waiting
+    // for the user to sign in. They are used again after invite acceptance.
+    if (joinParam) return
+    setJoinError(null)
+    setTenantParam(null)
+    setTastingParam(null)
+  }, [session, joinParam, setTenantParam, setTastingParam])
+
+  useEffect(() => {
+    if (!supabase || !session || !joinParam || joinProcessingRef.current) return
+
+    let active = true
+    joinProcessingRef.current = true
+    setJoining(true)
+    setJoinError(null)
+
+    void (async () => {
+      try {
+        const tenantId = await acceptTenantInvite(supabase, joinParam)
+        if (!active) return
+
+        await refreshMemberships()
+        if (!active) return
+
+        setTenantParam(tenantId)
+        setJoinParam(null)
+      } catch (caught) {
+        if (!active) return
+        setJoinError(formatError(caught))
+        setJoinParam(null)
+      } finally {
+        if (active) {
+          setJoining(false)
+        }
+        joinProcessingRef.current = false
+      }
+    })()
+
+    return () => {
+      active = false
+      joinProcessingRef.current = false
+    }
+  }, [session, joinParam, refreshMemberships, setJoinParam, setTenantParam])
+
+  useEffect(() => {
+    if (!session || membershipsLoading || isJoining) return
+
+    if (memberships.length === 0) {
+      if (tenantParam) setTenantParam(null)
+      if (tastingParam) setTastingParam(null)
       return
     }
 
-    try {
-      const liveSnapshot = selectedTastingId
-        ? await fetchSnapshotForTasting(supabase, selectedTastingId)
-        : await fetchLatestSnapshot(supabase)
-
-      if (liveSnapshot) {
-        setSnapshot(liveSnapshot)
-        setStatus('live')
-        setError(null)
-      } else {
-        setSnapshot(fallbackSnapshot)
-        setStatus('fallback')
-      }
-    } catch (caughtError) {
-      setSnapshot(fallbackSnapshot)
-      setStatus('fallback')
-      setError(
-        caughtError instanceof Error
-          ? `Supabase query failed: ${caughtError.message}`
-          : 'Supabase query failed.',
-      )
+    if (!tenantParam || !memberships.some((membership) => membership.tenant.id === tenantParam)) {
+      setTenantParam(memberships[0]?.tenant.id ?? null)
     }
-  }
+  }, [
+    session,
+    memberships,
+    membershipsLoading,
+    isJoining,
+    tenantParam,
+    tastingParam,
+    setTenantParam,
+    setTastingParam,
+  ])
+
+  const selectedTenantId = selectedTenant?.id ?? null
+
+  // Clear the previous tenant's tasting list as soon as the tenant changes.
+  // Nonce-based refreshes for the same tenant must not clear it, because that
+  // would unmount the score board and discard unsaved drafts.
+  useEffect(() => {
+    if (loadedTenantIdRef.current === selectedTenantId) return
+    loadedTenantIdRef.current = selectedTenantId
+    setTastings([])
+  }, [selectedTenantId])
+
+  const handleTastingsChanged = useCallback(() => {
+    setTastingsNonce((nonce) => nonce + 1)
+  }, [])
+
+  const refreshSnapshotRef = useRef(refreshSnapshot)
 
   useEffect(() => {
-    if (!supabase) {
-      setStatus('fallback')
-      setError('Add your Supabase URL and anon key in .env to enable live data.')
+    refreshSnapshotRef.current = refreshSnapshot
+  }, [refreshSnapshot])
+
+  const handleBeersChanged = useCallback(() => {
+    void refreshSnapshotRef.current({ silent: true })
+  }, [])
+
+  const handleInvitesChanged = useCallback(() => {
+    setInvitesNonce((nonce) => nonce + 1)
+  }, [])
+
+  const canSeeInvites = selectedRole === 'owner' || selectedRole === 'admin'
+
+  useTenantRealtime(
+    selectedTenantId,
+    canSeeInvites,
+    handleTastingsChanged,
+    handleBeersChanged,
+    handleInvitesChanged,
+  )
+
+  // Keep the tasting selector in sync with realtime status/title/date changes.
+  useEffect(() => {
+    if (!snapshot) return
+    setTastings((previous) =>
+      previous.map((tasting) =>
+        tasting.id === snapshot.tasting.id
+          ? { ...tasting, ...snapshot.tasting }
+          : tasting,
+      ),
+    )
+  }, [snapshot])
+
+  useEffect(() => {
+    if (!supabase || !selectedTenantId) {
+      setTastings([])
+      setTastingsLoading(false)
       return
     }
 
     let active = true
+    setTastingsLoading(true)
+    setTastingsError(null)
 
-    const syncSession = async (nextSession: Session | null) => {
-      if (!active || !supabase) {
-        return
-      }
-
-      setSession(nextSession)
-
-      if (!nextSession?.user) {
-        setCurrentTenant(null)
-        setSelectedTastingId(null)
-        setTenantTastings([])
-        return
-      }
-
-      try {
-        await ensureProfile(supabase, nextSession.user.id, nextSession.user.email ?? null)
-        const tenant = await fetchCurrentTenant(supabase, nextSession.user.id)
-        if (active) {
-          setCurrentTenant(tenant)
-          if (tenant) {
-            const tastings = await fetchTenantTastings(supabase, tenant.id)
-            setTenantTastings(tastings)
-            setSelectedTastingId((previous) => previous ?? tastings[0]?.id ?? null)
-          }
-        }
-      } catch (caughtError) {
-        if (active) {
-          setError(
-            caughtError instanceof Error
-              ? `Profile setup failed: ${caughtError.message}`
-              : 'Profile setup failed.',
-          )
-        }
-      }
-    }
-
-    supabase.auth.getSession().then(({ data: { session: activeSession } }) => {
-      void syncSession(activeSession)
-    })
-
-    const {
-      data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, nextSession) => {
-      void syncSession(nextSession)
-    })
+    fetchTastings(supabase, selectedTenantId)
+      .then((next) => {
+        if (active) setTastings(next)
+      })
+      .catch((caught) => {
+        if (active) setTastingsError(formatError(caught))
+      })
+      .finally(() => {
+        if (active) setTastingsLoading(false)
+      })
 
     return () => {
       active = false
-      subscription.unsubscribe()
     }
-  }, [])
+  }, [selectedTenantId, tastingsNonce])
 
   useEffect(() => {
-    let isMounted = true
+    if (!session || tastingsLoading || isJoining) return
 
-    async function loadSnapshot() {
-      if (!hasSupabaseConfig || !supabase) {
-        if (isMounted) {
-          setSnapshot(fallbackSnapshot)
-          setStatus('fallback')
-          setError('Add your Supabase URL and anon key in .env to enable live data.')
-        }
-        return
-      }
-
-      if (!session) {
-        if (isMounted) {
-          setSnapshot(fallbackSnapshot)
-          setStatus('fallback')
-          setError('Sign in to connect the app to Supabase.')
-        }
-        return
-      }
-
-      try {
-        const liveSnapshot = selectedTastingId
-          ? await fetchSnapshotForTasting(supabase, selectedTastingId)
-          : await fetchLatestSnapshot(supabase)
-
-        if (!isMounted) {
-          return
-        }
-
-        if (liveSnapshot) {
-          setSnapshot(liveSnapshot)
-          setStatus('live')
-          setError(null)
-          return
-        }
-
-        setSnapshot(fallbackSnapshot)
-        setStatus('fallback')
-        setError('No tenant or tasting data is available yet, so the demo snapshot is shown.')
-      } catch (caughtError) {
-        if (!isMounted) {
-          return
-        }
-
-        setSnapshot(fallbackSnapshot)
-        setStatus('fallback')
-        setError(
-          caughtError instanceof Error
-            ? `Supabase query failed: ${caughtError.message}`
-            : 'Supabase query failed.',
-        )
-      }
+    if (tastings.length === 0) {
+      if (tastingParam) setTastingParam(null)
+      return
     }
 
-    void loadSnapshot()
-
-    return () => {
-      isMounted = false
+    if (!tastingParam || !tastings.some((tasting) => tasting.id === tastingParam)) {
+      setTastingParam(tastings[0]?.id ?? null)
     }
-  }, [session, selectedTastingId])
+  }, [session, tastings, tastingsLoading, isJoining, tastingParam, setTastingParam])
 
   useEffect(() => {
-    const nextDraftScores: Record<string, { smell: string; color: string; branding: string; taste: string; notes: string }> = {}
-
-    for (const row of snapshot.rows) {
-      const key = `${row.participantId}:${row.beerId}`
-      nextDraftScores[key] = {
-        smell: row.smell?.toString() ?? '',
-        color: row.color?.toString() ?? '',
-        branding: row.branding?.toString() ?? '',
-        taste: row.taste?.toString() ?? '',
-        notes: row.notes ?? '',
-      }
-    }
-
-    setDraftScores(nextDraftScores)
-  }, [snapshot])
-
-  useEffect(() => {
-    if (!currentTenant || !supabase) {
+    if (
+      !supabase ||
+      !selectedTenantId ||
+      selectedRole === null ||
+      selectedRole === 'member'
+    ) {
+      setInvites([])
+      setInvitesError(null)
       return
     }
 
-    void (async () => {
-      const tastings = await fetchTenantTastings(supabase, currentTenant.id)
-      setTenantTastings(tastings)
-      if (!selectedTastingId && tastings[0]) {
-        setSelectedTastingId(tastings[0].id)
-      }
-    })()
-  }, [currentTenant, selectedTastingId])
-
-  const rankings = useMemo(() => deriveTastingRankings(snapshot), [snapshot])
-  const statusLabel =
-    status === 'live' ? 'Live Supabase data' : status === 'fallback' ? 'Fallback demo data' : 'Loading data'
-
-  const handleAuthSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
-    event.preventDefault()
-
-    if (!supabase || !email || !password) {
-      setError('Please provide an email and password.')
-      return
+    if (loadedInviteTenantIdRef.current !== selectedTenantId) {
+      loadedInviteTenantIdRef.current = selectedTenantId
+      setInvites([])
+      setInvitesError(null)
     }
 
-    setBusy(true)
-    setError(null)
+    let active = true
 
-    try {
-      if (authMode === 'signUp') {
-        const { error } = await supabase.auth.signUp({
-          email,
-          password,
-        })
-
-        if (error) {
-          throw error
+    fetchTenantInvites(supabase, selectedTenantId)
+      .then((next) => {
+        if (active) {
+          setInvites(next)
+          setInvitesError(null)
         }
-
-        setError('Account created. Check your inbox to confirm the email before signing in.')
-      } else {
-        const { error } = await supabase.auth.signInWithPassword({ email, password })
-
-        if (error) {
-          throw error
-        }
-      }
-    } catch (caughtError) {
-      setError(
-        caughtError instanceof Error ? caughtError.message : 'Authentication failed.',
-      )
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const handleSignOut = async () => {
-    if (!supabase) {
-      return
-    }
-
-    await supabase.auth.signOut()
-    setError(null)
-  }
-
-  const handleCreateTenant = async (event: React.FormEvent<HTMLFormElement>) => {
-    event.preventDefault()
-
-    if (!supabase || !session?.user) {
-      setError('Sign in before creating a tenant.')
-      return
-    }
-
-    if (!tenantName.trim()) {
-      setError('Tenant name is required.')
-      return
-    }
-
-    setBusy(true)
-    setError(null)
-
-    try {
-      const createdTenant = await createTenantForUser(
-        supabase,
-        session.user.id,
-        tenantName,
-        tenantSlug || tenantName,
-      )
-      setCurrentTenant(createdTenant)
-      setTenantName('')
-      setTenantSlug('')
-      setError(null)
-    } catch (caughtError) {
-      setError(
-        caughtError instanceof Error ? caughtError.message : 'Tenant creation failed.',
-      )
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const handleCreateTasting = async (event: React.FormEvent<HTMLFormElement>) => {
-    event.preventDefault()
-
-    if (!supabase || !session?.user || !currentTenant) {
-      setError('Create a tenant before creating a tasting.')
-      return
-    }
-
-    if (!tastingTitle.trim()) {
-      setError('Tasting title is required.')
-      return
-    }
-
-    setBusy(true)
-    setError(null)
-
-    try {
-      const createdTasting = await createTastingForTenant(
-        supabase,
-        currentTenant.id,
-        session.user.id,
-        tastingTitle,
-        tastingDate,
-      )
-      const updated = await fetchTenantTastings(supabase, currentTenant.id)
-      setTenantTastings(updated)
-      setSelectedTastingId(createdTasting.id)
-      setTastingTitle('')
-      setTastingDate(new Date().toISOString().slice(0, 10))
-      await refreshSnapshot()
-    } catch (caughtError) {
-      setError(
-        caughtError instanceof Error ? caughtError.message : 'Tasting creation failed.',
-      )
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const handleAddParticipant = async (event: React.FormEvent<HTMLFormElement>) => {
-    event.preventDefault()
-
-    if (!supabase || !selectedTastingId) {
-      setError('Create a tasting before adding participants.')
-      return
-    }
-
-    if (!participantName.trim()) {
-      setError('Participant name is required.')
-      return
-    }
-
-    setBusy(true)
-    setError(null)
-
-    try {
-      await addParticipantToTasting(supabase, selectedTastingId, participantName, session?.user?.id ?? null)
-      setParticipantName('')
-      await refreshSnapshot()
-    } catch (caughtError) {
-      setError(
-        caughtError instanceof Error ? caughtError.message : 'Participant creation failed.',
-      )
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const handleAddBeer = async (event: React.FormEvent<HTMLFormElement>) => {
-    event.preventDefault()
-
-    if (!supabase || !currentTenant || !selectedTastingId) {
-      setError('Create a tasting before assigning beers.')
-      return
-    }
-
-    if (!beerName.trim()) {
-      setError('Beer name is required.')
-      return
-    }
-
-    setBusy(true)
-    setError(null)
-
-    try {
-      const beer = await upsertBeerForTenant(supabase, currentTenant.id, {
-        name: beerName,
-        brewery: beerBrewery,
-        style: beerStyle,
-        alcohol: beerAlcohol ? Number(beerAlcohol) : null,
+      })
+      .catch((caught) => {
+        if (active) setInvitesError(formatError(caught))
       })
 
-      const position = (snapshot.beers?.length ?? 0) + 1
-      await assignBeerToTasting(supabase, selectedTastingId, beer.id, position)
-
-      setBeerName('')
-      setBeerBrewery('')
-      setBeerStyle('')
-      setBeerAlcohol('')
-      await refreshSnapshot()
-    } catch (caughtError) {
-      setError(caughtError instanceof Error ? caughtError.message : 'Beer assignment failed.')
-    } finally {
-      setBusy(false)
+    return () => {
+      active = false
     }
-  }
+  }, [selectedTenantId, selectedRole, invitesNonce])
 
-  const handleScoreChange = (
-    participantId: string,
-    beerId: string,
-    field: 'smell' | 'color' | 'branding' | 'taste' | 'notes',
-    value: string,
-  ) => {
-    const key = `${participantId}:${beerId}`
-    setDraftScores((current) => ({
-      ...current,
-      [key]: {
-        smell: current[key]?.smell ?? '',
-        color: current[key]?.color ?? '',
-        branding: current[key]?.branding ?? '',
-        taste: current[key]?.taste ?? '',
-        notes: current[key]?.notes ?? '',
-        [field]: value,
-      },
-    }))
-  }
+  const handleDirtyChange = useCallback((dirty: boolean) => {
+    setScoreboardDirty(dirty)
+  }, [])
 
-  const handleSaveScores = async () => {
-    if (!supabase || !selectedTastingId) {
-      setError('Select a tasting before saving scores.')
+  const handleRankingChanged = useCallback(() => {
+    setTenantRankingSeed((seed) => seed + 1)
+  }, [])
+
+  const handleSignOut = async () => {
+    if (
+      scoreboardDirty &&
+      !window.confirm('You have unsaved scores. Sign out and discard them?')
+    ) {
       return
     }
 
-    setBusy(true)
-    setError(null)
-
-    try {
-      for (const [key, values] of Object.entries(draftScores)) {
-        const [participantId, beerId] = key.split(':')
-        const smell = values.smell === '' ? null : Number(values.smell)
-        const color = values.color === '' ? null : Number(values.color)
-        const branding = values.branding === '' ? null : Number(values.branding)
-        const taste = values.taste === '' ? null : Number(values.taste)
-
-        if (
-          participantId && beerId &&
-          [smell, color, branding, taste].some((value) => value !== null)
-        ) {
-          await saveScoreRow(supabase, selectedTastingId, participantId, beerId, {
-            smell,
-            color,
-            branding,
-            taste,
-            notes: values.notes.trim() || null,
-          })
-        }
-      }
-
-      await refreshSnapshot()
-    } catch (caughtError) {
-      setError(
-        caughtError instanceof Error ? caughtError.message : 'Saving scores failed.',
-      )
-    } finally {
-      setBusy(false)
-    }
+    await signOut()
+    setScoreboardDirty(false)
   }
 
-  const tenantTitle = currentTenant?.name ?? snapshot.tenant.name
-  const tenantSlugLabel = currentTenant?.slug ?? snapshot.tenant.slug
+  const handleCreateTenant = async (name: string, slug: string) => {
+    if (!supabase) {
+      throw new Error('Supabase is not configured.')
+    }
+
+    if (
+      scoreboardDirty &&
+      !window.confirm('You have unsaved scores. Switch group and discard them?')
+    ) {
+      throw new Error('Save or discard your current scores before changing groups.')
+    }
+
+    const tenant = await createTenant(supabase, name, slug)
+    await refreshMemberships()
+    setScoreboardDirty(false)
+    setJoinParam(null)
+    setJoinError(null)
+    setTenantParam(tenant.id)
+    setTastingParam(null)
+    setTastings([])
+    setInvites([])
+  }
+
+  const handleJoinTenant = async (token: string) => {
+    if (!supabase) {
+      throw new Error('Supabase is not configured.')
+    }
+
+    if (
+      scoreboardDirty &&
+      !window.confirm('You have unsaved scores. Switch group and discard them?')
+    ) {
+      throw new Error('Save or discard your current scores before changing groups.')
+    }
+
+    const tenantId = await acceptTenantInvite(supabase, token)
+    await refreshMemberships()
+    setScoreboardDirty(false)
+    setJoinParam(null)
+    setJoinError(null)
+    setTenantParam(tenantId)
+    setTastingParam(null)
+    setTastings([])
+    setInvites([])
+  }
+
+  const handleSelectTenant = (tenantId: string) => {
+    if (tenantId === selectedTenantId) return
+
+    if (
+      scoreboardDirty &&
+      !window.confirm('You have unsaved scores. Switch group and discard them?')
+    ) {
+      return
+    }
+
+    setScoreboardDirty(false)
+    setTenantParam(tenantId)
+    setTastingParam(null)
+    setTastings([])
+    setInvites([])
+  }
+
+  const handleSelectTasting = (tastingId: string) => {
+    if (tastingId === tastingParam) return
+
+    if (
+      scoreboardDirty &&
+      !window.confirm('You have unsaved scores. Switch tasting and discard them?')
+    ) {
+      return
+    }
+
+    setScoreboardDirty(false)
+    setTastingParam(tastingId)
+  }
+
+  const handleCreateTasting = async (title: string, date: string) => {
+    if (!supabase || !selectedTenantId) {
+      throw new Error('Select a group before creating a tasting.')
+    }
+
+    if (
+      scoreboardDirty &&
+      !window.confirm('You have unsaved scores. Create a new tasting and discard them?')
+    ) {
+      throw new Error('Save or discard your current scores before creating another tasting.')
+    }
+
+    const created = await createTasting(supabase, selectedTenantId, title, date)
+    handleRankingChanged()
+    setScoreboardDirty(false)
+    setTastings((previous) => [
+      created,
+      ...previous.filter((tasting) => tasting.id !== created.id),
+    ])
+    setTastingParam(created.id)
+    setTastingsNonce((nonce) => nonce + 1)
+  }
+
+  const handleStatusChange = async (status: TastingStatus) => {
+    if (!supabase || !selectedTasting) {
+      throw new Error('Select a tasting first.')
+    }
+
+    if (status === 'completed' && scoreboardDirty) {
+      throw new Error('Save or discard your scores before completing the tasting.')
+    }
+
+    await updateTastingStatus(supabase, selectedTasting.id, status)
+    setTastings((previous) =>
+      previous.map((tasting) =>
+        tasting.id === selectedTasting.id ? { ...tasting, status } : tasting,
+      ),
+    )
+    await refreshSnapshot({ silent: true })
+  }
+
+  const handleDeleteTasting = async () => {
+    if (!supabase || !selectedTasting) {
+      throw new Error('Select a tasting first.')
+    }
+
+    await deleteTasting(supabase, selectedTasting.id)
+    handleRankingChanged()
+    setScoreboardDirty(false)
+    setTastings((previous) =>
+      previous.filter((tasting) => tasting.id !== selectedTasting.id),
+    )
+    setTastingParam(null)
+    setTastingsNonce((nonce) => nonce + 1)
+  }
+
+  const handleAddParticipant = async (displayName: string, participantUserId: string | null) => {
+    if (!supabase || !selectedTasting) {
+      throw new Error('Select a tasting first.')
+    }
+
+    await addParticipant(supabase, selectedTasting.id, displayName, participantUserId)
+    handleRankingChanged()
+    await refreshSnapshot({ silent: true })
+  }
+
+  const handleRemoveParticipant = async (participantId: string) => {
+    if (!supabase) {
+      throw new Error('Supabase is not configured.')
+    }
+
+    await removeParticipant(supabase, participantId)
+    handleRankingChanged()
+    await refreshSnapshot({ silent: true })
+  }
+
+  const handleAddBeer = async (beer: {
+    name: string
+    brewery: string | null
+    style: string | null
+    alcohol: number | null
+  }) => {
+    if (!supabase || !selectedTasting) {
+      throw new Error('Select a tasting first.')
+    }
+
+    await addBeerToTasting(supabase, selectedTasting.id, beer)
+    handleRankingChanged()
+    await refreshSnapshot({ silent: true })
+  }
+
+  const handleRemoveBeer = async (beerId: string) => {
+    if (!supabase || !selectedTasting) {
+      throw new Error('Select a tasting first.')
+    }
+
+    await removeBeerFromTasting(supabase, selectedTasting.id, beerId)
+    handleRankingChanged()
+    await refreshSnapshot({ silent: true })
+  }
+
+  const handleCreateInvite = async (
+    role: Exclude<TenantRole, 'owner'>,
+  ): Promise<TenantInvite> => {
+    if (!supabase || !selectedTenantId) {
+      throw new Error('Select a group first.')
+    }
+
+    const invite = await createTenantInvite(supabase, selectedTenantId, role)
+    setInvites((previous) => [invite, ...previous])
+    setInvitesNonce((nonce) => nonce + 1)
+    return invite
+  }
+
+  const handleRevokeInvite = async (inviteId: string) => {
+    if (!supabase) {
+      throw new Error('Supabase is not configured.')
+    }
+
+    await deleteTenantInvite(supabase, inviteId)
+    setInvites((previous) => previous.filter((invite) => invite.id !== inviteId))
+  }
+
+  const handleSaveScores = async (
+    rows: SaveScoreInput[],
+  ): Promise<SaveScoreResult[]> => {
+    if (!supabase || !selectedTasting) {
+      throw new Error('Select a tasting first.')
+    }
+
+    if (!snapshot || snapshot.tasting.id !== selectedTasting.id) {
+      throw new Error('The selected tasting changed. Reload and try again.')
+    }
+
+    const results = await saveScores(supabase, selectedTasting.id, rows)
+    handleRankingChanged()
+    return results
+  }
+
+  const handleRefreshSnapshot = async () => {
+    await refreshSnapshot({ silent: true })
+  }
 
   return (
     <div className="app-shell">
       <header className="topbar">
         <div>
-          <p className="eyebrow">Tenant</p>
-          <h1>{tenantTitle}</h1>
+          <p className="eyebrow">BeerTasting</p>
+          <h1>{selectedTenant?.name ?? 'BeerTasting v2'}</h1>
+          <p className="topbar-subtitle">
+            {selectedTenant ? selectedTenant.slug : 'Private tasting groups for friends'}
+          </p>
         </div>
-        <div className="tenant-pill">{tenantSlugLabel}</div>
+
+        <div className="topbar-actions">
+          {selectedRole ? (
+            <span className={`role-pill role-${selectedRole}`}>{selectedRole}</span>
+          ) : null}
+
+          {selectedTenant && memberships.length > 1 ? (
+            <TenantSwitcher
+              memberships={memberships}
+              selectedTenantId={selectedTenant.id}
+              onSelect={handleSelectTenant}
+            />
+          ) : null}
+
+          {session ? (
+            <button
+              type="button"
+              className="secondary-button"
+              onClick={() => void handleSignOut()}
+            >
+              Sign out
+            </button>
+          ) : null}
+        </div>
       </header>
 
       <main className="page-grid">
-        {!session ? (
-          <section className="panel auth-card full-width">
-            <p className="eyebrow">Access</p>
-            <h2>Sign in to your tasting group</h2>
-
-            <div className="auth-toggle" role="tablist" aria-label="Authentication mode">
-              <button
-                type="button"
-                className={authMode === 'signUp' ? 'active' : ''}
-                onClick={() => setAuthMode('signUp')}
-              >
-                Create account
-              </button>
-              <button
-                type="button"
-                className={authMode === 'signIn' ? 'active' : ''}
-                onClick={() => setAuthMode('signIn')}
-              >
-                Sign in
-              </button>
-            </div>
-
-            <form className="auth-form" onSubmit={handleAuthSubmit}>
-              <label className="field-group">
-                <span>Email</span>
-                <input
-                  type="email"
-                  value={email}
-                  onChange={(event) => setEmail(event.target.value)}
-                  placeholder="you@example.com"
-                  required
-                />
-              </label>
-
-              <label className="field-group">
-                <span>Password</span>
-                <input
-                  type="password"
-                  value={password}
-                  onChange={(event) => setPassword(event.target.value)}
-                  placeholder="••••••••"
-                  minLength={6}
-                  required
-                />
-              </label>
-
-              <button type="submit" className="primary-button" disabled={busy}>
-                {busy ? 'Please wait…' : authMode === 'signUp' ? 'Create account' : 'Sign in'}
-              </button>
-            </form>
-          </section>
-        ) : (
+        {!hasSupabaseConfig ? (
           <section className="panel full-width">
-            <p className="eyebrow">Account</p>
-            <div className="account-row">
-              <div>
-                <h2>{session.user.email}</h2>
-                <p className="status-text">Signed in with Supabase Auth.</p>
-              </div>
-              <button type="button" className="secondary-button" onClick={handleSignOut}>
-                Sign out
-              </button>
-            </div>
-          </section>
-        )}
-
-        {session && !currentTenant ? (
-          <section className="panel full-width">
-            <p className="eyebrow">Create tenant</p>
-            <h2>Start your first tasting group</h2>
-
-            <form className="tenant-form" onSubmit={handleCreateTenant}>
-              <label className="field-group">
-                <span>Group name</span>
-                <input
-                  type="text"
-                  value={tenantName}
-                  onChange={(event) => setTenantName(event.target.value)}
-                  placeholder="Friday Beer Club"
-                  required
-                />
-              </label>
-
-              <label className="field-group">
-                <span>Slug</span>
-                <input
-                  type="text"
-                  value={tenantSlug}
-                  onChange={(event) => setTenantSlug(event.target.value)}
-                  placeholder="friday-beer-club"
-                />
-              </label>
-
-              <button type="submit" className="primary-button" disabled={busy}>
-                {busy ? 'Creating…' : 'Create tenant'}
-              </button>
-            </form>
+            <p className="eyebrow">Configuration</p>
+            <h2>Connect Supabase</h2>
+            <p className="status-text">{supabaseConfigError}</p>
+            <p className="muted">
+              Create a <code>.env</code> file with <code>VITE_SUPABASE_URL</code> and{' '}
+              <code>VITE_SUPABASE_ANON_KEY</code>, then apply{' '}
+              <code>supabase/migrations/202610200001_init.sql</code>.
+            </p>
           </section>
         ) : null}
 
-        {session && currentTenant ? (
+        {hasSupabaseConfig && authLoading ? (
+          <LoadingPanel label="Checking your session…" />
+        ) : null}
+
+        {hasSupabaseConfig && !authLoading && !session ? (
+          <AuthPanel onSignIn={signIn} onSignUp={signUp} onResetPassword={resetPassword} />
+        ) : null}
+
+        {authError ? (
+          <StatusBanner tone="error" onDismiss={clearAuthError}>
+            {authError}
+          </StatusBanner>
+        ) : null}
+
+        {session && !recovery && (membershipsLoading || isJoining) ? (
+          <LoadingPanel label={isJoining ? 'Joining the group…' : 'Loading your groups…'} />
+        ) : null}
+
+        {joinError ? (
+          <StatusBanner tone="error" onDismiss={() => setJoinError(null)}>
+            {joinError}
+          </StatusBanner>
+        ) : null}
+
+        {session && recovery ? (
+          <PasswordRecoveryPanel
+            onUpdatePassword={updatePassword}
+            onCancel={clearRecovery}
+          />
+        ) : null}
+
+        {membershipsError && memberships.length > 0 ? (
+          <StatusBanner tone="error" onDismiss={clearMembershipsError}>
+            {membershipsError}
+          </StatusBanner>
+        ) : null}
+
+        {session &&
+        !recovery &&
+        !isJoining &&
+        !membershipsLoading &&
+        membershipsError &&
+        memberships.length === 0 ? (
+          <section className="panel full-width">
+            <p className="eyebrow">Groups</p>
+            <h2>Could not load your groups</h2>
+            <p className="status-text">{membershipsError}</p>
+            <button
+              type="button"
+              className="primary-button"
+              onClick={() => void refreshMemberships()}
+            >
+              Try again
+            </button>
+          </section>
+        ) : null}
+
+        {session &&
+        !recovery &&
+        !isJoining &&
+        !membershipsLoading &&
+        !membershipsError &&
+        memberships.length === 0 ? (
+          <TenantSetup onCreate={handleCreateTenant} onJoin={handleJoinTenant} />
+        ) : null}
+
+        {tastingsError ? (
+          <StatusBanner tone="error" onDismiss={() => setTastingsError(null)}>
+            <p>{tastingsError}</p>
+            <button
+              type="button"
+              className="secondary-button small-button"
+              onClick={() => setTastingsNonce((nonce) => nonce + 1)}
+            >
+              Retry
+            </button>
+          </StatusBanner>
+        ) : null}
+
+        {invitesError ? (
+          <StatusBanner tone="error" onDismiss={() => setInvitesError(null)}>
+            {invitesError}
+          </StatusBanner>
+        ) : null}
+
+        {snapshotError ? (
+          <StatusBanner tone="warning" onDismiss={clearSnapshotError}>
+            {snapshotError}
+          </StatusBanner>
+        ) : null}
+
+        {realtimeStatus === 'error' ? (
+          <StatusBanner tone="warning">
+            <p>Realtime connection interrupted. The app is retrying.</p>
+            <button
+              type="button"
+              className="secondary-button small-button"
+              onClick={() => void refreshSnapshot({ silent: true })}
+            >
+              Refresh now
+            </button>
+          </StatusBanner>
+        ) : null}
+
+        {session && !recovery && !isJoining && selectedMembership ? (
           <>
-            <section className="panel full-width">
-              <p className="eyebrow">Tasting setup</p>
-              <h2>Create a tasting</h2>
+            <TastingPanel
+              key={`tastings-${selectedMembership.tenant.id}`}
+              tastings={tastings}
+              selectedTasting={selectedTasting}
+              role={selectedMembership.role}
+              currentUserId={session.user.id}
+              loading={tastingsLoading}
+              onSelect={handleSelectTasting}
+              onCreate={handleCreateTasting}
+              onStatusChange={handleStatusChange}
+              onDelete={handleDeleteTasting}
+            />
 
-              <form className="stacked-form" onSubmit={handleCreateTasting}>
-                <label className="field-group">
-                  <span>Tasting title</span>
-                  <input
-                    type="text"
-                    value={tastingTitle}
-                    onChange={(event) => setTastingTitle(event.target.value)}
-                    placeholder="Autumn tasting"
-                    required
-                  />
-                </label>
+            {selectedTasting && activeSnapshot ? (
+              <>
+                <ParticipantForm
+                  key={`participants-${activeSnapshot.tasting.id}`}
+                  participants={activeSnapshot.participants}
+                  currentUserId={session.user.id}
+                  role={selectedMembership.role}
+                  onAdd={handleAddParticipant}
+                  onRemove={handleRemoveParticipant}
+                  readOnly={selectedTasting.status === 'completed'}
+                />
 
-                <label className="field-group">
-                  <span>Tasting date</span>
-                  <input
-                    type="date"
-                    value={tastingDate}
-                    onChange={(event) => setTastingDate(event.target.value)}
-                    required
-                  />
-                </label>
+                <BeerForm
+                  key={`beers-${activeSnapshot.tasting.id}`}
+                  beers={activeSnapshot.beers}
+                  onAdd={handleAddBeer}
+                  onRemove={handleRemoveBeer}
+                  readOnly={selectedTasting.status === 'completed'}
+                />
 
-                <button type="submit" className="primary-button" disabled={busy}>
-                  {busy ? 'Saving…' : 'Create tasting'}
+                <ScoreBoard
+                  key={activeSnapshot.tasting.id}
+                  snapshot={activeSnapshot}
+                  currentUserId={session.user.id}
+                  role={selectedMembership.role}
+                  readOnly={selectedTasting.status === 'completed'}
+                  onSave={handleSaveScores}
+                  onRefresh={handleRefreshSnapshot}
+                  onDirtyChange={handleDirtyChange}
+                />
+
+                <RankingPanel
+                  rankings={rankings}
+                  tastingTitle={activeSnapshot.tasting.title}
+                />
+              </>
+            ) : null}
+
+            {selectedTasting && !activeSnapshot && snapshotStatus !== 'error' ? (
+              <LoadingPanel label="Loading the tasting snapshot…" />
+            ) : null}
+
+            {selectedTasting && !activeSnapshot && snapshotStatus === 'error' ? (
+              <section className="panel full-width">
+                <p className="eyebrow">Snapshot</p>
+                <h2>Could not load this tasting</h2>
+                <p className="status-text">{snapshotError}</p>
+                <button
+                  type="button"
+                  className="primary-button"
+                  onClick={() => void refreshSnapshot()}
+                >
+                  Try again
                 </button>
-              </form>
-            </section>
+              </section>
+            ) : null}
 
-            <section className="panel full-width">
-              <p className="eyebrow">Current tasting</p>
-              <div className="select-row">
-                <label className="field-group compact">
-                  <span>Selected tasting</span>
-                  <select
-                    value={selectedTastingId ?? ''}
-                    onChange={(event) => setSelectedTastingId(event.target.value || null)}
-                  >
-                    {tenantTastings.length === 0 ? (
-                      <option value="">No tastings yet</option>
-                    ) : (
-                      tenantTastings.map((tasting) => (
-                        <option key={tasting.id} value={tasting.id}>
-                          {tasting.title}
-                        </option>
-                      ))
-                    )}
-                  </select>
-                </label>
-              </div>
-            </section>
+            <OverallRankingPanel
+              key={`overall-${selectedMembership.tenant.id}`}
+              tenantId={selectedMembership.tenant.id}
+              tenantName={selectedMembership.tenant.name}
+              refreshSeed={tenantRankingSeed}
+            />
 
-            <section className="panel">
-              <p className="eyebrow">Add participant</p>
-              <h2>Invite a taster</h2>
-              <form className="stacked-form" onSubmit={handleAddParticipant}>
-                <label className="field-group">
-                  <span>Name</span>
-                  <input
-                    type="text"
-                    value={participantName}
-                    onChange={(event) => setParticipantName(event.target.value)}
-                    placeholder="Jeroen"
-                  />
-                </label>
-                <button type="submit" className="primary-button" disabled={busy}>
-                  Add participant
-                </button>
-              </form>
-            </section>
+            {selectedTasting && activeSnapshot ? (
+              <SnapshotSummary
+                snapshot={activeSnapshot}
+                snapshotStatus={snapshotStatus}
+                realtimeStatus={realtimeStatus}
+                lastError={snapshotError}
+              />
+            ) : null}
 
-            <section className="panel">
-              <p className="eyebrow">Add beer</p>
-              <h2>Seed the tasting catalog</h2>
-              <form className="stacked-form" onSubmit={handleAddBeer}>
-                <label className="field-group">
-                  <span>Beer name</span>
-                  <input
-                    type="text"
-                    value={beerName}
-                    onChange={(event) => setBeerName(event.target.value)}
-                    placeholder="Black Horizon"
-                  />
-                </label>
-                <label className="field-group">
-                  <span>Brewery</span>
-                  <input
-                    type="text"
-                    value={beerBrewery}
-                    onChange={(event) => setBeerBrewery(event.target.value)}
-                    placeholder="Northside"
-                  />
-                </label>
-                <label className="field-group">
-                  <span>Style</span>
-                  <input
-                    type="text"
-                    value={beerStyle}
-                    onChange={(event) => setBeerStyle(event.target.value)}
-                    placeholder="Stout"
-                  />
-                </label>
-                <label className="field-group">
-                  <span>ABV</span>
-                  <input
-                    type="number"
-                    step="0.1"
-                    min="0"
-                    max="100"
-                    value={beerAlcohol}
-                    onChange={(event) => setBeerAlcohol(event.target.value)}
-                    placeholder="8.2"
-                  />
-                </label>
-                <button type="submit" className="primary-button" disabled={busy}>
-                  Add beer
-                </button>
-              </form>
-            </section>
+            {selectedMembership.role !== 'member' ? (
+              <InvitePanel
+                key={`invites-${selectedMembership.tenant.id}`}
+                invites={invites}
+                role={selectedMembership.role}
+                tenantId={selectedMembership.tenant.id}
+                tastingId={selectedTasting?.id ?? null}
+                onCreate={handleCreateInvite}
+                onRevoke={handleRevokeInvite}
+              />
+            ) : null}
 
-            <section className="panel full-width">
-              <p className="eyebrow">Scoring</p>
-              <h2>Score each beer per participant</h2>
-
-              {snapshot.beers.length === 0 || snapshot.participants.length === 0 ? (
-                <p className="status-text">Add at least one beer and one participant to start scoring.</p>
-              ) : (
-                <div className="score-board">
-                  <div
-                    className="score-table-header"
-                    style={{
-                      gridTemplateColumns: `minmax(150px, 180px) repeat(${snapshot.beers.length}, minmax(180px, 1fr))`,
-                    }}
-                  >
-                    <div>Participant</div>
-                    {snapshot.beers.map((beer) => (
-                      <div key={beer.id}>{beer.name}</div>
-                    ))}
-                  </div>
-
-                  {snapshot.participants.map((participant) => (
-                    <div
-                      key={participant.id}
-                      className="score-row"
-                      style={{
-                        gridTemplateColumns: `minmax(150px, 180px) repeat(${snapshot.beers.length}, minmax(180px, 1fr))`,
-                      }}
-                    >
-                      <div className="participant-label">{participant.displayName}</div>
-                      {snapshot.beers.map((beer) => {
-                        const key = `${participant.id}:${beer.id}`
-                        const values = draftScores[key] ?? {
-                          smell: '',
-                          color: '',
-                          branding: '',
-                          taste: '',
-                          notes: '',
-                        }
-
-                        return (
-                          <div key={`${participant.id}-${beer.id}`} className="score-cell">
-                            <input
-                              type="number"
-                              step="0.1"
-                              min="0"
-                              max="10"
-                              value={values.smell}
-                              onChange={(event) => handleScoreChange(participant.id, beer.id, 'smell', event.target.value)}
-                              placeholder="smell"
-                            />
-                            <input
-                              type="number"
-                              step="0.1"
-                              min="0"
-                              max="10"
-                              value={values.color}
-                              onChange={(event) => handleScoreChange(participant.id, beer.id, 'color', event.target.value)}
-                              placeholder="color"
-                            />
-                            <input
-                              type="number"
-                              step="0.1"
-                              min="0"
-                              max="10"
-                              value={values.branding}
-                              onChange={(event) => handleScoreChange(participant.id, beer.id, 'branding', event.target.value)}
-                              placeholder="branding"
-                            />
-                            <input
-                              type="number"
-                              step="0.1"
-                              min="0"
-                              max="10"
-                              value={values.taste}
-                              onChange={(event) => handleScoreChange(participant.id, beer.id, 'taste', event.target.value)}
-                              placeholder="taste"
-                            />
-                            <textarea
-                              rows={2}
-                              value={values.notes}
-                              onChange={(event) => handleScoreChange(participant.id, beer.id, 'notes', event.target.value)}
-                              placeholder="notes"
-                            />
-                          </div>
-                        )
-                      })}
-                    </div>
-                  ))}
-
-                  <div className="score-actions">
-                    <button type="button" className="primary-button" onClick={handleSaveScores} disabled={busy}>
-                      {busy ? 'Saving…' : 'Save scores'}
-                    </button>
-                  </div>
-                </div>
-              )}
-            </section>
+            <GroupActionsPanel
+              onCreate={handleCreateTenant}
+              onJoin={handleJoinTenant}
+            />
           </>
         ) : null}
-
-        <section className="panel panel-highlight">
-          <p className="eyebrow">Current tasting</p>
-          <h2>{snapshot.tasting.title}</h2>
-          <div className="meta-row">
-            <span>{snapshot.tasting.date}</span>
-            <span>{snapshot.tasting.status}</span>
-          </div>
-
-          <div className="stat-row">
-            <div>
-              <strong>{snapshot.participants.length}</strong>
-              <span>participants</span>
-            </div>
-            <div>
-              <strong>{snapshot.beers.length}</strong>
-              <span>beers</span>
-            </div>
-            <div>
-              <strong>{snapshot.rows.length}</strong>
-              <span>score rows</span>
-            </div>
-          </div>
-        </section>
-
-        <section className="panel">
-          <p className="eyebrow">Data source</p>
-          <div className="source-badge">{statusLabel}</div>
-          {error ? <p className="status-text">{error}</p> : null}
-          <ul className="feature-list">
-            <li>Tenant boundaries isolate each group</li>
-            <li>Users belong via tenant membership</li>
-            <li>Tastings, beers, participants, and scores stay normalized</li>
-            <li>Client loads a tasting snapshot and derives rankings locally</li>
-          </ul>
-        </section>
-
-        <section className="panel full-width">
-          <div className="panel-header">
-            <div>
-              <p className="eyebrow">Ranking</p>
-              <h3>Derived from the local snapshot</h3>
-            </div>
-            <span className="panel-badge">live client calculation</span>
-          </div>
-
-          <div className="ranking-list">
-            {rankings.map((beer, index) => (
-              <div className="ranking-row" key={beer.beerId}>
-                <div className="position">#{index + 1}</div>
-                <div className="beer-info">
-                  <strong>{beer.name}</strong>
-                  <span>{beer.votes} votes</span>
-                </div>
-                <div className="score-value">{beer.averageScore.toFixed(1)}</div>
-              </div>
-            ))}
-          </div>
-        </section>
       </main>
     </div>
   )
