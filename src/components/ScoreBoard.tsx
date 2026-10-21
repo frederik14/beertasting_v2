@@ -57,6 +57,10 @@ const CRITERIA: Array<{ key: ScoreCriterion; label: string; max: number }> = [
   { key: 'taste', label: 'Taste', max: 20 },
 ]
 
+// Large imported tastings have hundreds of beers. Rendering every card/column
+// at once creates tens of thousands of inputs, so the scoreboard pages by beer.
+const BEERS_PER_PAGE = 12
+
 const parseScore = (value: string, label: string, max: number): number | null => {
   if (value.trim() === '') return null
   const parsed = Number(value)
@@ -104,10 +108,16 @@ export function ScoreBoard({
     buildDrafts(snapshot),
   )
   const [view, setView] = useState<'mine' | 'all'>('mine')
+  const [beerPage, setBeerPage] = useState(0)
   const myParticipant =
     snapshot.participants.find((participant) => participant.userId === currentUserId) ??
     null
   const hadParticipantRef = useRef(Boolean(myParticipant))
+
+  const beerPageCount = Math.max(1, Math.ceil(snapshot.beers.length / BEERS_PER_PAGE))
+  const safeBeerPage = Math.min(beerPage, beerPageCount - 1)
+  const pageStart = safeBeerPage * BEERS_PER_PAGE
+  const pageBeers = snapshot.beers.slice(pageStart, pageStart + BEERS_PER_PAGE)
 
   useEffect(() => {
     const hasParticipant = Boolean(myParticipant)
@@ -385,6 +395,36 @@ export function ScoreBoard({
     }
   }
 
+  const renderBeerPager = () => {
+    if (snapshot.beers.length <= BEERS_PER_PAGE) return null
+
+    return (
+      <div className="beer-pager">
+        <button
+          type="button"
+          className="secondary-button small-button"
+          disabled={safeBeerPage === 0}
+          onClick={() => setBeerPage(Math.max(0, safeBeerPage - 1))}
+        >
+          Previous
+        </button>
+        <span className="beer-meta">
+          Beers {pageStart + 1}–
+          {Math.min(pageStart + BEERS_PER_PAGE, snapshot.beers.length)} of{' '}
+          {snapshot.beers.length} · page {safeBeerPage + 1} of {beerPageCount}
+        </span>
+        <button
+          type="button"
+          className="secondary-button small-button"
+          disabled={safeBeerPage >= beerPageCount - 1}
+          onClick={() => setBeerPage(Math.min(beerPageCount - 1, safeBeerPage + 1))}
+        >
+          Next
+        </button>
+      </div>
+    )
+  }
+
   const renderMyRatings = () => {
     const participant = myParticipant
 
@@ -419,7 +459,7 @@ export function ScoreBoard({
         </div>
 
         <div className="rating-card-grid">
-          {snapshot.beers.map((beer) => {
+          {pageBeers.map((beer) => {
             const key = keyOf(participant.id, beer.id)
             const draft = drafts[key] ?? emptyDraft()
             const isDirty = dirtyKeys.has(key)
@@ -510,6 +550,7 @@ export function ScoreBoard({
             )
           })}
         </div>
+        {renderBeerPager()}
       </div>
     )
   }
@@ -631,7 +672,7 @@ export function ScoreBoard({
           <thead>
             <tr>
               <th scope="col">Participant</th>
-              {snapshot.beers.map((beer) => (
+              {pageBeers.map((beer) => (
                 <th scope="col" key={beer.id}>
                   {beer.name}
                 </th>
@@ -657,7 +698,7 @@ export function ScoreBoard({
                     ) : null}
                   </th>
 
-                  {snapshot.beers.map((beer) => {
+                  {pageBeers.map((beer) => {
                     const key = keyOf(participant.id, beer.id)
                     const draft = drafts[key] ?? emptyDraft()
                     const isDirty = dirtyKeys.has(key)
@@ -729,6 +770,8 @@ export function ScoreBoard({
           </table>
         </div>
       )}
+
+      {view === 'all' ? renderBeerPager() : null}
 
       {!readOnly && (view === 'all' || myParticipant) ? (
         <div className="score-actions">

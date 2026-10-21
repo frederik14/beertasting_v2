@@ -1,7 +1,9 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useTenantRanking } from '../hooks/useTenantRanking'
 import { deriveOverallRankings } from '../lib/rankings'
 import { StatusBanner } from './StatusBanner'
+
+const OVERALL_PAGE_SIZE = 50
 
 type Props = {
   tenantId: string
@@ -72,9 +74,12 @@ function SortHeader({
 }
 
 export function OverallRankingPanel({ tenantId, tenantName, refreshSeed = 0 }: Props) {
+  const [enabled, setEnabled] = useState(false)
+  const sectionRef = useRef<HTMLElement | null>(null)
   const { data, loading, error, refresh, clearError } = useTenantRanking(
     tenantId,
     refreshSeed,
+    enabled,
   )
 
   const [from, setFrom] = useState('')
@@ -84,6 +89,36 @@ export function OverallRankingPanel({ tenantId, tenantName, refreshSeed = 0 }: P
   const [selectedParticipants, setSelectedParticipants] = useState<string[]>([])
   const [sortKey, setSortKey] = useState<SortKey>('score')
   const [sortDirection, setSortDirection] = useState<SortDirection>('desc')
+  const [visibleCount, setVisibleCount] = useState(OVERALL_PAGE_SIZE)
+
+  useEffect(() => {
+    setVisibleCount(OVERALL_PAGE_SIZE)
+  }, [from, to, search, style, selectedParticipants])
+
+  useEffect(() => {
+    if (enabled) return
+
+    const node = sectionRef.current
+    if (!node) return
+
+    if (typeof IntersectionObserver === 'undefined') {
+      setEnabled(true)
+      return
+    }
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          setEnabled(true)
+          observer.disconnect()
+        }
+      },
+      { rootMargin: '300px 0px' },
+    )
+
+    observer.observe(node)
+    return () => observer.disconnect()
+  }, [enabled])
 
   const participantNames = useMemo(() => {
     const names = new Set((data?.participants ?? []).map((participant) => participant.displayName))
@@ -225,15 +260,17 @@ export function OverallRankingPanel({ tenantId, tenantName, refreshSeed = 0 }: P
     onSort: handleSort,
   }
 
+  const visibleRankings = sortedRankings.slice(0, visibleCount)
+
   return (
-    <section className="panel full-width overall-ranking-panel">
+    <section ref={sectionRef} className="panel full-width overall-ranking-panel">
       <div className="panel-header">
         <div>
           <p className="eyebrow">All tastings</p>
           <h2>Overall beer ranking</h2>
         </div>
         <span className="panel-badge">
-          {loading && !data ? 'Loading…' : `${rankings.length} beers`}
+          {!enabled || (loading && !data) ? 'Loading…' : `${rankings.length} beers`}
         </span>
       </div>
 
@@ -243,13 +280,20 @@ export function OverallRankingPanel({ tenantId, tenantName, refreshSeed = 0 }: P
         with taste weighted double. Use Refresh to pick up other people's latest scores.
       </p>
 
-      {error ? (
+      {!enabled ? (
+        <p className="empty-state overall-ranking-empty">
+          The overall ranking loads when you scroll to this section.
+        </p>
+      ) : null}
+
+      {enabled && error ? (
         <StatusBanner tone="warning" onDismiss={clearError}>
           {error}
         </StatusBanner>
       ) : null}
 
-      <div className="overall-filters">
+      {enabled ? (
+        <div className="overall-filters">
         <label className="field-group">
           <span>From tasting date</span>
           <input type="date" value={from} onChange={(event) => setFrom(event.target.value)} />
@@ -328,27 +372,28 @@ export function OverallRankingPanel({ tenantId, tenantName, refreshSeed = 0 }: P
             Reset filters
           </button>
         </div>
-      </div>
+        </div>
+      ) : null}
 
-      {loading && !data ? (
+      {enabled && loading && !data ? (
         <p className="empty-state overall-ranking-empty" role="status">
           <span className="spinner" aria-hidden="true" /> Loading all tastings…
         </p>
       ) : null}
 
-      {!loading && !data ? (
+      {enabled && !loading && !data ? (
         <p className="empty-state overall-ranking-empty">
           No ranking data is available for this group yet.
         </p>
       ) : null}
 
-      {data && rankings.length === 0 ? (
+      {enabled && data && rankings.length === 0 ? (
         <p className="empty-state overall-ranking-empty">
           No complete scores match these filters.
         </p>
       ) : null}
 
-      {rankings.length > 0 ? (
+      {enabled && rankings.length > 0 ? (
         <div
           className="overall-ranking-wrap"
           tabIndex={0}
@@ -391,7 +436,7 @@ export function OverallRankingPanel({ tenantId, tenantName, refreshSeed = 0 }: P
               </tr>
             </thead>
             <tbody>
-              {sortedRankings.map((beer) => (
+              {visibleRankings.map((beer) => (
                 <tr key={beer.beerId}>
                   <td className="rank-cell">#{beer.rank}</td>
                   <td>
@@ -418,6 +463,30 @@ export function OverallRankingPanel({ tenantId, tenantName, refreshSeed = 0 }: P
               ))}
             </tbody>
           </table>
+        </div>
+      ) : null}
+
+      {enabled && rankings.length > visibleRankings.length ? (
+        <div className="ranking-more">
+          <span className="beer-meta">
+            Showing {visibleRankings.length} of {rankings.length} beers
+          </span>
+          <div className="control-row">
+            <button
+              type="button"
+              className="secondary-button small-button"
+              onClick={() => setVisibleCount((count) => count + OVERALL_PAGE_SIZE)}
+            >
+              Show {OVERALL_PAGE_SIZE} more
+            </button>
+            <button
+              type="button"
+              className="secondary-button small-button"
+              onClick={() => setVisibleCount(rankings.length)}
+            >
+              Show all
+            </button>
+          </div>
         </div>
       ) : null}
     </section>

@@ -11,9 +11,13 @@ import type { TenantRankingData } from '../lib/types'
  * participants, beers or tastings. Remote changes in other tastings are picked
  * up with the panel's Refresh button (matching the old app's ranking).
  */
-export function useTenantRanking(tenantId: string | null, refreshSeed = 0) {
+export function useTenantRanking(
+  tenantId: string | null,
+  refreshSeed = 0,
+  enabled = true,
+) {
   const [data, setData] = useState<TenantRankingData | null>(null)
-  const [loading, setLoading] = useState(Boolean(tenantId))
+  const [loading, setLoading] = useState(Boolean(tenantId) && enabled)
   const [error, setError] = useState<string | null>(null)
   const requestId = useRef(0)
   const loadedTenantIdRef = useRef<string | null>(null)
@@ -60,6 +64,8 @@ export function useTenantRanking(tenantId: string | null, refreshSeed = 0) {
   )
 
   useEffect(() => {
+    if (!enabled) return
+
     if (loadedTenantIdRef.current !== tenantId) {
       loadedTenantIdRef.current = tenantId
       setData(null)
@@ -67,7 +73,7 @@ export function useTenantRanking(tenantId: string | null, refreshSeed = 0) {
     }
 
     void refresh()
-  }, [tenantId, refreshSeed, refresh])
+  }, [enabled, tenantId, refreshSeed, refresh])
 
   return {
     data,

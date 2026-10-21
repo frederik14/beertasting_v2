@@ -899,6 +899,22 @@ code {
   margin: 0;
 }
 
+.beer-pager,
+.ranking-more {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.ranking-more {
+  margin-top: 14px;
+}
+
 @media (max-width: 560px) {
   .rating-fields {
     grid-template-columns: 1fr;
@@ -908,6 +924,17 @@ code {
     flex-direction: column;
     align-items: flex-start;
   }
+
+  .beer-pager,
+  .ranking-more {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .beer-pager .beer-meta,
+  .ranking-more .beer-meta {
+    text-align: center;
+  }
 }
 
 @media (max-width: 760px) {
@@ -916,8 +943,7 @@ code {
     bottom: 0;
     z-index: 2;
     padding: 12px 0;
-    background: rgba(20, 23, 34, 0.96);
-    backdrop-filter: blur(6px);
+    background: #141722;
   }
 }
 

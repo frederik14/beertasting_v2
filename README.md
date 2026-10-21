@@ -327,6 +327,21 @@ default 1,000-row cap. This matters for the imported ZBL data: the synthetic
 Both ranking functions live in `src/lib/rankings.ts` and are covered by unit
 tests.
 
+## Large tastings and performance
+
+The synthetic 2020 tasting has 284 beers and over 3,000 scores. Rendering every
+score field or ranking row at once creates a very large DOM, so the app limits
+what is rendered:
+
+- **My ratings** and **All ratings** page by 12 beers. Drafts and unsaved changes
+  are kept across pages, so saving still covers every dirty row.
+- The **Overall beer ranking** loads only when it is scrolled into view, and
+  initially renders 50 beers. Use **Show 50 more** or **Show all** to expand it.
+- Tenant-wide ranking data is fetched in pages because PostgREST caps a single
+  response at 1,000 rows by default.
+- The mobile sticky save bar uses a solid background rather than a backdrop
+  blur, which avoids expensive compositing while scrolling.
+
 ## Concurrency
 
 `scores.updated_at` is the version token. The client sends the timestamp it

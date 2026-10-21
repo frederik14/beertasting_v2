@@ -60,4 +60,37 @@ describe('ScoreBoard', () => {
     ).toBe('true')
     expect(screen.getByRole('columnheader', { name: 'Participant' })).toBeTruthy()
   })
+
+  it('pages large beer lists instead of rendering every score field at once', () => {
+    const manyBeers: TastingSnapshot = {
+      ...snapshot,
+      beers: Array.from({ length: 13 }, (_, index) => ({
+        id: `beer-${index + 1}`,
+        name: `Beer ${index + 1}`,
+        brewery: null,
+        style: null,
+        alcohol: null,
+      })),
+    }
+
+    render(
+      <ScoreBoard
+        snapshot={manyBeers}
+        currentUserId="user-1"
+        role="member"
+        readOnly={false}
+        onSave={noopSave}
+        onRefresh={noopRefresh}
+        onDirtyChange={() => {}}
+      />,
+    )
+
+    expect(screen.getByRole('heading', { name: 'Beer 12' })).toBeTruthy()
+    expect(screen.queryByRole('heading', { name: 'Beer 13' })).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+
+    expect(screen.getByRole('heading', { name: 'Beer 13' })).toBeTruthy()
+    expect(screen.queryByRole('heading', { name: 'Beer 1' })).toBeNull()
+  })
 })
