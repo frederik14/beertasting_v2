@@ -20,6 +20,11 @@ Realtime.
   participants and enter scores on their behalf.
 - Members can add beers to a tasting. Beer metadata is not silently erased when
   a beer is re-added with blank fields.
+- Beers can be edited while a tasting is open. Renaming or changing brewery,
+  style or ABV keeps the assigned beer and all of its scores. Beer metadata is
+  shared by the whole group catalog. Removal is tucked inside the edit panel as
+  a deliberate danger action because it deletes that beer's scores in the
+  tasting.
 - Scores are saved through an RPC that detects concurrent changes. A conflicting
   save is reported and can be reloaded or explicitly overwritten.
 - Completed tastings are read-only (participants, beer assignments and scores)

@@ -756,6 +756,22 @@
   font-size: 0.8rem;
 }
 
+.beer-edit-form {
+  flex: 1 1 100%;
+  min-width: 0;
+}
+
+.beer-edit-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.beer-edit-actions .danger-button {
+  margin-left: auto;
+}
+
 /* Score board ------------------------------------------------------------ */
 
 .score-table-wrap,

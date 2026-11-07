@@ -37,6 +37,7 @@ import {
   removeParticipant,
   renameParticipant,
   saveScores,
+  updateBeer,
   updateTastingStatus,
 } from './lib/api'
 import { deriveTastingRankings } from './lib/rankings'
@@ -583,6 +584,24 @@ function App() {
     await refreshSnapshot({ silent: true })
   }
 
+  const handleEditBeer = async (
+    beerId: string,
+    beer: {
+      name: string
+      brewery: string | null
+      style: string | null
+      alcohol: number | null
+    },
+  ) => {
+    if (!supabase) {
+      throw new Error('Supabase is not configured.')
+    }
+
+    await updateBeer(supabase, beerId, beer)
+    handleRankingChanged()
+    await refreshSnapshot({ silent: true })
+  }
+
   const handleRemoveBeer = async (beerId: string) => {
     if (!supabase || !selectedTasting) {
       throw new Error('Select a tasting first.')
@@ -918,6 +937,7 @@ function App() {
                     key={`beers-${activeSnapshot.tasting.id}`}
                     beers={activeSnapshot.beers}
                     onAdd={handleAddBeer}
+                    onEdit={handleEditBeer}
                     onRemove={handleRemoveBeer}
                     readOnly={selectedTasting.status === 'completed'}
                   />

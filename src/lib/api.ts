@@ -493,6 +493,36 @@ export async function addBeerToTasting(
   }
 }
 
+export async function updateBeer(
+  client: AppSupabaseClient,
+  beerId: string,
+  beer: {
+    name: string
+    brewery: string | null
+    style: string | null
+    alcohol: number | null
+  },
+): Promise<void> {
+  const name = beer.name.trim()
+  if (!name) {
+    throw new Error('Beer name is required.')
+  }
+
+  const { error } = await client
+    .from('beers')
+    .update({
+      name,
+      brewery: beer.brewery,
+      style: beer.style,
+      alcohol: beer.alcohol,
+    })
+    .eq('id', beerId)
+
+  if (error) {
+    throw new Error(formatError(error))
+  }
+}
+
 export async function removeBeerFromTasting(
   client: AppSupabaseClient,
   tastingId: string,
