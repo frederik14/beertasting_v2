@@ -2,6 +2,7 @@ import './App.css'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AuthPanel } from './components/AuthPanel'
 import { BeerForm } from './components/BeerForm'
+import { CurrentTastingBar } from './components/CurrentTastingBar'
 import { GroupActionsPanel } from './components/GroupActionsPanel'
 import { InvitePanel } from './components/InvitePanel'
 import { LoadingPanel } from './components/LoadingPanel'
@@ -34,6 +35,7 @@ import {
   formatError,
   removeBeerFromTasting,
   removeParticipant,
+  renameParticipant,
   saveScores,
   updateTastingStatus,
 } from './lib/api'
@@ -47,6 +49,14 @@ import type {
   TenantInvite,
   TenantRole,
 } from './lib/types'
+
+type AppView = 'tasting' | 'overall' | 'group'
+
+const VIEW_TABS: Array<{ id: AppView; label: string }> = [
+  { id: 'tasting', label: 'Tasting' },
+  { id: 'overall', label: 'Ranking' },
+  { id: 'group', label: 'Group' },
+]
 
 function App() {
   const {
@@ -87,9 +97,12 @@ function App() {
 
   const [scoreboardDirty, setScoreboardDirty] = useState(false)
   const [tenantRankingSeed, setTenantRankingSeed] = useState(0)
+  const [activeView, setActiveView] = useState<AppView>('tasting')
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const [joinError, setJoinError] = useState<string | null>(null)
   const [joining, setJoining] = useState(false)
   const joinProcessingRef = useRef(false)
+  const topbarRef = useRef<HTMLElement | null>(null)
   const isJoining = Boolean(session && (joining || joinParam))
   const loadedTenantIdRef = useRef<string | null>(null)
   const loadedInviteTenantIdRef = useRef<string | null>(null)
@@ -141,6 +154,8 @@ function App() {
     setInvites([])
     setScoreboardDirty(false)
     setJoining(false)
+    setActiveView('tasting')
+    setMobileMenuOpen(false)
     // Preserve tenant/tasting query parameters while a join link is waiting
     // for the user to sign in. They are used again after invite acceptance.
     if (joinParam) return
@@ -184,6 +199,29 @@ function App() {
       joinProcessingRef.current = false
     }
   }, [session, joinParam, refreshMemberships, setJoinParam, setTenantParam])
+
+  useEffect(() => {
+    if (!mobileMenuOpen) return
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setMobileMenuOpen(false)
+    }
+    const handlePointerDown = (event: PointerEvent) => {
+      if (
+        topbarRef.current &&
+        !topbarRef.current.contains(event.target as Node)
+      ) {
+        setMobileMenuOpen(false)
+      }
+    }
+
+    document.addEventListener('keydown', handleKeyDown)
+    document.addEventListener('pointerdown', handlePointerDown)
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown)
+      document.removeEventListener('pointerdown', handlePointerDown)
+    }
+  }, [mobileMenuOpen])
 
   useEffect(() => {
     if (!session || membershipsLoading || isJoining) return
@@ -335,6 +373,13 @@ function App() {
     }
   }, [selectedTenantId, selectedRole, invitesNonce])
 
+  const handleViewChange = (view: AppView) => {
+    setMobileMenuOpen(false)
+    if (view === activeView) return
+    setActiveView(view)
+    window.scrollTo(0, 0)
+  }
+
   const handleDirtyChange = useCallback((dirty: boolean) => {
     setScoreboardDirty(dirty)
   }, [])
@@ -344,6 +389,7 @@ function App() {
   }, [])
 
   const handleSignOut = async () => {
+    setMobileMenuOpen(false)
     if (
       scoreboardDirty &&
       !window.confirm('You have unsaved scores. Sign out and discard them?')
@@ -402,6 +448,7 @@ function App() {
   }
 
   const handleSelectTenant = (tenantId: string) => {
+    setMobileMenuOpen(false)
     if (tenantId === selectedTenantId) return
 
     if (
@@ -498,6 +545,19 @@ function App() {
     await refreshSnapshot({ silent: true })
   }
 
+  const handleRenameParticipant = async (
+    participantId: string,
+    displayName: string,
+  ) => {
+    if (!supabase) {
+      throw new Error('Supabase is not configured.')
+    }
+
+    await renameParticipant(supabase, participantId, displayName)
+    handleRankingChanged()
+    await refreshSnapshot({ silent: true })
+  }
+
   const handleRemoveParticipant = async (participantId: string) => {
     if (!supabase) {
       throw new Error('Supabase is not configured.')
@@ -575,9 +635,12 @@ function App() {
     await refreshSnapshot({ silent: true })
   }
 
+  const activeViewLabel =
+    VIEW_TABS.find((tab) => tab.id === activeView)?.label ?? 'Tasting'
+
   return (
     <div className="app-shell">
-      <header className="topbar">
+      <header ref={topbarRef} className="topbar">
         <div>
           <p className="eyebrow">BeerTasting</p>
           <h1>{selectedTenant?.name ?? 'BeerTasting v2'}</h1>
@@ -602,14 +665,101 @@ function App() {
           {session ? (
             <button
               type="button"
-              className="secondary-button"
+              className="secondary-button topbar-signout"
               onClick={() => void handleSignOut()}
             >
               Sign out
             </button>
           ) : null}
+
+          {selectedMembership ? (
+            <span className="mobile-view-badge">{activeViewLabel}</span>
+          ) : null}
+
+          {session && !recovery && !isJoining ? (
+            <button
+              type="button"
+              className="mobile-menu-toggle"
+              aria-label={mobileMenuOpen ? 'Close menu' : 'Open menu'}
+              aria-expanded={mobileMenuOpen}
+              aria-controls="mobile-menu"
+              onClick={() => setMobileMenuOpen((open) => !open)}
+            >
+              <span aria-hidden="true">{mobileMenuOpen ? '×' : '☰'}</span>
+            </button>
+          ) : null}
         </div>
+
+        {session && !recovery && !isJoining && mobileMenuOpen ? (
+          <div className="mobile-menu-panel" id="mobile-menu">
+            {selectedMembership ? (
+              <>
+                <div className="mobile-menu-group">
+                  <p className="eyebrow">Group</p>
+                  <strong>{selectedMembership.tenant.name}</strong>
+                  <span className="beer-meta">{selectedMembership.tenant.slug}</span>
+                  <span className={`role-pill role-${selectedMembership.role}`}>
+                    {selectedMembership.role}
+                  </span>
+                </div>
+
+                <nav className="mobile-view-nav" aria-label="App sections">
+                  {VIEW_TABS.map((tab) => (
+                    <button
+                      key={tab.id}
+                      type="button"
+                      className={activeView === tab.id ? 'active' : ''}
+                      aria-current={activeView === tab.id ? 'page' : undefined}
+                      onClick={() => handleViewChange(tab.id)}
+                    >
+                      <span>{tab.label}</span>
+                      {activeView === tab.id ? <span aria-hidden="true">✓</span> : null}
+                    </button>
+                  ))}
+                </nav>
+
+                {memberships.length > 1 ? (
+                  <TenantSwitcher
+                    memberships={memberships}
+                    selectedTenantId={selectedMembership.tenant.id}
+                    onSelect={handleSelectTenant}
+                  />
+                ) : null}
+
+                <hr className="mobile-menu-divider" />
+              </>
+            ) : null}
+
+            {session ? (
+              <button
+                type="button"
+                className="secondary-button mobile-menu-signout"
+                onClick={() => void handleSignOut()}
+              >
+                Sign out
+              </button>
+            ) : null}
+          </div>
+        ) : null}
       </header>
+
+      {session && !recovery && !isJoining && selectedMembership ? (
+        <div className="view-nav-shell">
+          <nav className="view-nav" aria-label="App sections">
+            {VIEW_TABS.map((tab) => (
+              <button
+                key={tab.id}
+                type="button"
+                className={activeView === tab.id ? 'active' : ''}
+                aria-current={activeView === tab.id ? 'page' : undefined}
+                onClick={() => handleViewChange(tab.id)}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </nav>
+        </div>
+      ) : null}
 
       <main className="page-grid">
         {!hasSupabaseConfig ? (
@@ -731,108 +881,132 @@ function App() {
 
         {session && !recovery && !isJoining && selectedMembership ? (
           <>
-            <TastingPanel
-              key={`tastings-${selectedMembership.tenant.id}`}
-              tastings={tastings}
-              selectedTasting={selectedTasting}
-              role={selectedMembership.role}
-              currentUserId={session.user.id}
-              loading={tastingsLoading}
-              onSelect={handleSelectTasting}
-              onCreate={handleCreateTasting}
-              onStatusChange={handleStatusChange}
-              onDelete={handleDeleteTasting}
-            />
-
-            {selectedTasting && activeSnapshot ? (
-              <>
-                <ParticipantForm
-                  key={`participants-${activeSnapshot.tasting.id}`}
-                  participants={activeSnapshot.participants}
-                  currentUserId={session.user.id}
-                  role={selectedMembership.role}
-                  onAdd={handleAddParticipant}
-                  onRemove={handleRemoveParticipant}
-                  readOnly={selectedTasting.status === 'completed'}
-                />
-
-                <BeerForm
-                  key={`beers-${activeSnapshot.tasting.id}`}
-                  beers={activeSnapshot.beers}
-                  onAdd={handleAddBeer}
-                  onRemove={handleRemoveBeer}
-                  readOnly={selectedTasting.status === 'completed'}
-                />
-
-                <ScoreBoard
-                  key={activeSnapshot.tasting.id}
-                  snapshot={activeSnapshot}
-                  currentUserId={session.user.id}
-                  role={selectedMembership.role}
-                  readOnly={selectedTasting.status === 'completed'}
-                  onSave={handleSaveScores}
-                  onRefresh={handleRefreshSnapshot}
-                  onDirtyChange={handleDirtyChange}
-                />
-
-                <RankingPanel
-                  rankings={rankings}
-                  tastingTitle={activeSnapshot.tasting.title}
-                />
-              </>
-            ) : null}
-
-            {selectedTasting && !activeSnapshot && snapshotStatus !== 'error' ? (
-              <LoadingPanel label="Loading the tasting snapshot…" />
-            ) : null}
-
-            {selectedTasting && !activeSnapshot && snapshotStatus === 'error' ? (
-              <section className="panel full-width">
-                <p className="eyebrow">Snapshot</p>
-                <h2>Could not load this tasting</h2>
-                <p className="status-text">{snapshotError}</p>
-                <button
-                  type="button"
-                  className="primary-button"
-                  onClick={() => void refreshSnapshot()}
-                >
-                  Try again
-                </button>
-              </section>
-            ) : null}
-
-            <OverallRankingPanel
-              key={`overall-${selectedMembership.tenant.id}`}
-              tenantId={selectedMembership.tenant.id}
-              tenantName={selectedMembership.tenant.name}
-              refreshSeed={tenantRankingSeed}
-            />
-
-            {selectedTasting && activeSnapshot ? (
-              <SnapshotSummary
-                snapshot={activeSnapshot}
-                snapshotStatus={snapshotStatus}
-                realtimeStatus={realtimeStatus}
-                lastError={snapshotError}
+            <div className="app-view" hidden={activeView !== 'tasting'}>
+              <CurrentTastingBar
+                tastings={tastings}
+                selectedTasting={selectedTasting}
+                loading={tastingsLoading}
+                onSelect={handleSelectTasting}
+                onManage={() => handleViewChange('group')}
               />
-            ) : null}
 
-            {selectedMembership.role !== 'member' ? (
-              <InvitePanel
-                key={`invites-${selectedMembership.tenant.id}`}
-                invites={invites}
-                role={selectedMembership.role}
+              {selectedTasting && activeSnapshot ? (
+                <>
+                  <ScoreBoard
+                    key={activeSnapshot.tasting.id}
+                    snapshot={activeSnapshot}
+                    currentUserId={session.user.id}
+                    role={selectedMembership.role}
+                    readOnly={selectedTasting.status === 'completed'}
+                    onSave={handleSaveScores}
+                    onRefresh={handleRefreshSnapshot}
+                    onDirtyChange={handleDirtyChange}
+                  />
+
+                  <ParticipantForm
+                    key={`participants-${activeSnapshot.tasting.id}`}
+                    participants={activeSnapshot.participants}
+                    currentUserId={session.user.id}
+                    role={selectedMembership.role}
+                    onAdd={handleAddParticipant}
+                    onRename={handleRenameParticipant}
+                    onRemove={handleRemoveParticipant}
+                    readOnly={selectedTasting.status === 'completed'}
+                  />
+
+                  <BeerForm
+                    key={`beers-${activeSnapshot.tasting.id}`}
+                    beers={activeSnapshot.beers}
+                    onAdd={handleAddBeer}
+                    onRemove={handleRemoveBeer}
+                    readOnly={selectedTasting.status === 'completed'}
+                  />
+
+                  <RankingPanel
+                    rankings={rankings}
+                    tastingTitle={activeSnapshot.tasting.title}
+                  />
+                </>
+              ) : null}
+
+              {selectedTasting && !activeSnapshot && snapshotStatus !== 'error' ? (
+                <LoadingPanel label="Loading the tasting snapshot…" />
+              ) : null}
+
+              {selectedTasting && !activeSnapshot && snapshotStatus === 'error' ? (
+                <section className="panel full-width">
+                  <p className="eyebrow">Snapshot</p>
+                  <h2>Could not load this tasting</h2>
+                  <p className="status-text">{snapshotError}</p>
+                  <button
+                    type="button"
+                    className="primary-button"
+                    onClick={() => void refreshSnapshot()}
+                  >
+                    Try again
+                  </button>
+                </section>
+              ) : null}
+            </div>
+
+            <div className="app-view" hidden={activeView !== 'overall'}>
+              <OverallRankingPanel
+                key={`overall-${selectedMembership.tenant.id}`}
                 tenantId={selectedMembership.tenant.id}
-                tastingId={selectedTasting?.id ?? null}
-                onCreate={handleCreateInvite}
-                onRevoke={handleRevokeInvite}
+                tenantName={selectedMembership.tenant.name}
+                refreshSeed={tenantRankingSeed}
+                active={activeView === 'overall'}
               />
-            ) : null}
+            </div>
 
-            <GroupActionsPanel
-              onCreate={handleCreateTenant}
-              onJoin={handleJoinTenant}
-            />
+            <div className="app-view" hidden={activeView !== 'group'}>
+              <section className="panel full-width">
+                <p className="eyebrow">Group</p>
+                <h2>{selectedMembership.tenant.name}</h2>
+                <p className="muted">
+                  Tastings, invites, group access and the remaining app actions.
+                </p>
+              </section>
+
+              <TastingPanel
+                key={`tastings-${selectedMembership.tenant.id}`}
+                tastings={tastings}
+                selectedTasting={selectedTasting}
+                role={selectedMembership.role}
+                currentUserId={session.user.id}
+                loading={tastingsLoading}
+                onSelect={handleSelectTasting}
+                onCreate={handleCreateTasting}
+                onStatusChange={handleStatusChange}
+                onDelete={handleDeleteTasting}
+              />
+
+              {selectedMembership.role !== 'member' ? (
+                <InvitePanel
+                  key={`invites-${selectedMembership.tenant.id}`}
+                  invites={invites}
+                  role={selectedMembership.role}
+                  tenantId={selectedMembership.tenant.id}
+                  tastingId={selectedTasting?.id ?? null}
+                  onCreate={handleCreateInvite}
+                  onRevoke={handleRevokeInvite}
+                />
+              ) : null}
+
+              {selectedTasting && activeSnapshot ? (
+                <SnapshotSummary
+                  snapshot={activeSnapshot}
+                  snapshotStatus={snapshotStatus}
+                  realtimeStatus={realtimeStatus}
+                  lastError={snapshotError}
+                />
+              ) : null}
+
+              <GroupActionsPanel
+                onCreate={handleCreateTenant}
+                onJoin={handleJoinTenant}
+              />
+            </div>
           </>
         ) : null}
       </main>

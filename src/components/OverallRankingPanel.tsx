@@ -1,6 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useTenantRanking } from '../hooks/useTenantRanking'
 import { deriveOverallRankings } from '../lib/rankings'
+import type { OverallRankedBeer } from '../lib/types'
+import { BeerRatingsDialog } from './BeerRatingsDialog'
 import { StatusBanner } from './StatusBanner'
 
 const OVERALL_PAGE_SIZE = 50
@@ -9,6 +11,7 @@ type Props = {
   tenantId: string
   tenantName: string
   refreshSeed?: number
+  active?: boolean
 }
 
 type SortKey =
@@ -25,6 +28,32 @@ type SortKey =
   | 'tastings'
 
 type SortDirection = 'asc' | 'desc'
+
+const COLUMN_DEFS: Array<{ key: SortKey; label: string; numeric?: boolean }> = [
+  { key: 'rank', label: '#' },
+  { key: 'name', label: 'Beer' },
+  { key: 'style', label: 'Type' },
+  { key: 'alcohol', label: 'ABV', numeric: true },
+  { key: 'smell', label: 'Smell', numeric: true },
+  { key: 'color', label: 'Color', numeric: true },
+  { key: 'branding', label: 'Branding', numeric: true },
+  { key: 'taste', label: 'Taste', numeric: true },
+  { key: 'score', label: 'Score / 100', numeric: true },
+  { key: 'votes', label: 'Votes', numeric: true },
+  { key: 'tastings', label: 'Tastings', numeric: true },
+]
+
+const ALL_COLUMNS = COLUMN_DEFS.map((column) => column.key)
+const MOBILE_COLUMNS: SortKey[] = ['rank', 'name', 'score']
+
+const defaultColumns = (): Set<SortKey> => {
+  const isMobile =
+    typeof window !== 'undefined' &&
+    typeof window.matchMedia === 'function' &&
+    window.matchMedia('(max-width: 760px)').matches
+
+  return new Set(isMobile ? MOBILE_COLUMNS : ALL_COLUMNS)
+}
 
 const toIsoDate = (date: Date): string => {
   const year = date.getFullYear()
@@ -73,13 +102,18 @@ function SortHeader({
   )
 }
 
-export function OverallRankingPanel({ tenantId, tenantName, refreshSeed = 0 }: Props) {
-  const [enabled, setEnabled] = useState(false)
-  const sectionRef = useRef<HTMLElement | null>(null)
+export function OverallRankingPanel({
+  tenantId,
+  tenantName,
+  refreshSeed = 0,
+  active = true,
+}: Props) {
+  const [enabled, setEnabled] = useState(active)
   const { data, loading, error, refresh, clearError } = useTenantRanking(
     tenantId,
     refreshSeed,
     enabled,
+    active,
   )
 
   const [from, setFrom] = useState('')
@@ -90,35 +124,27 @@ export function OverallRankingPanel({ tenantId, tenantName, refreshSeed = 0 }: P
   const [sortKey, setSortKey] = useState<SortKey>('score')
   const [sortDirection, setSortDirection] = useState<SortDirection>('desc')
   const [visibleCount, setVisibleCount] = useState(OVERALL_PAGE_SIZE)
+  const [visibleColumns, setVisibleColumns] = useState<Set<SortKey>>(defaultColumns)
+  const [selectedBeer, setSelectedBeer] = useState<OverallRankedBeer | null>(null)
+
+  const activeFilterCount =
+    (from ? 1 : 0) +
+    (to ? 1 : 0) +
+    (search.trim() ? 1 : 0) +
+    (style ? 1 : 0) +
+    (selectedParticipants.length > 0 ? 1 : 0)
 
   useEffect(() => {
     setVisibleCount(OVERALL_PAGE_SIZE)
   }, [from, to, search, style, selectedParticipants])
 
   useEffect(() => {
-    if (enabled) return
+    if (active) setEnabled(true)
+  }, [active])
 
-    const node = sectionRef.current
-    if (!node) return
-
-    if (typeof IntersectionObserver === 'undefined') {
-      setEnabled(true)
-      return
-    }
-
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (entries.some((entry) => entry.isIntersecting)) {
-          setEnabled(true)
-          observer.disconnect()
-        }
-      },
-      { rootMargin: '300px 0px' },
-    )
-
-    observer.observe(node)
-    return () => observer.disconnect()
-  }, [enabled])
+  useEffect(() => {
+    if (!active) setSelectedBeer(null)
+  }, [active])
 
   const participantNames = useMemo(() => {
     const names = new Set((data?.participants ?? []).map((participant) => participant.displayName))
@@ -246,6 +272,31 @@ export function OverallRankingPanel({ tenantId, tenantName, refreshSeed = 0 }: P
     setSelectedParticipants([])
   }
 
+  const toggleColumn = (column: SortKey) => {
+    const isVisible = visibleColumns.has(column)
+    if (isVisible && visibleColumns.size === 1) return
+
+    const next = new Set(visibleColumns)
+    if (isVisible) {
+      next.delete(column)
+    } else {
+      next.add(column)
+    }
+    setVisibleColumns(next)
+
+    if (isVisible && sortKey === column) {
+      const fallback = next.has('score') ? 'score' : next.has('name') ? 'name' : 'rank'
+      setSortKey(fallback)
+      setSortDirection(fallback === 'score' ? 'desc' : 'asc')
+    }
+  }
+
+  const resetColumns = () => {
+    setVisibleColumns(defaultColumns())
+    setSortKey('score')
+    setSortDirection('desc')
+  }
+
   const applyLastWeek = () => {
     const end = new Date()
     const start = new Date()
@@ -263,7 +314,7 @@ export function OverallRankingPanel({ tenantId, tenantName, refreshSeed = 0 }: P
   const visibleRankings = sortedRankings.slice(0, visibleCount)
 
   return (
-    <section ref={sectionRef} className="panel full-width overall-ranking-panel">
+    <section className="panel full-width overall-ranking-panel">
       <div className="panel-header">
         <div>
           <p className="eyebrow">All tastings</p>
@@ -274,15 +325,19 @@ export function OverallRankingPanel({ tenantId, tenantName, refreshSeed = 0 }: P
         </span>
       </div>
 
-      <p className="muted overall-ranking-intro">
-        Every complete rating in {tenantName}, across all tastings. A row counts only
-        when smell, color, branding and taste are all filled in. Scores are out of 100,
-        with taste weighted double. Use Refresh to pick up other people's latest scores.
-      </p>
+      <details className="info-disclosure overall-ranking-info">
+        <summary>How the ranking works</summary>
+        <p className="muted">
+          Every complete rating in {tenantName}, across all tastings. A row counts only
+          when smell, color, branding and taste are all filled in. Scores are out of 100,
+          with taste weighted double. Use Refresh to pick up other people's latest
+          scores.
+        </p>
+      </details>
 
       {!enabled ? (
-        <p className="empty-state overall-ranking-empty">
-          The overall ranking loads when you scroll to this section.
+        <p className="empty-state overall-ranking-empty" role="status">
+          Preparing the overall ranking…
         </p>
       ) : null}
 
@@ -293,8 +348,12 @@ export function OverallRankingPanel({ tenantId, tenantName, refreshSeed = 0 }: P
       ) : null}
 
       {enabled ? (
-        <div className="overall-filters">
-        <label className="field-group">
+        <details className="info-disclosure overall-filters-disclosure">
+          <summary>
+            Filters &amp; columns{activeFilterCount > 0 ? ` (${activeFilterCount})` : ''}
+          </summary>
+          <div className="overall-filters">
+            <label className="field-group">
           <span>From tasting date</span>
           <input type="date" value={from} onChange={(event) => setFrom(event.target.value)} />
         </label>
@@ -356,6 +415,30 @@ export function OverallRankingPanel({ tenantId, tenantName, refreshSeed = 0 }: P
           ) : null}
         </details>
 
+        <fieldset className="column-picker">
+          <legend>Columns</legend>
+          <div className="column-grid">
+            {COLUMN_DEFS.map((column) => {
+              const checked = visibleColumns.has(column.key)
+
+              return (
+                <label className="checkbox-row" key={column.key}>
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    disabled={checked && visibleColumns.size === 1}
+                    onChange={() => toggleColumn(column.key)}
+                  />
+                  <span>{column.label}</span>
+                </label>
+              )
+            })}
+          </div>
+          <button type="button" className="link-button" onClick={resetColumns}>
+            Use default columns
+          </button>
+        </fieldset>
+
         <div className="overall-filter-actions">
           <button
             type="button"
@@ -372,7 +455,8 @@ export function OverallRankingPanel({ tenantId, tenantName, refreshSeed = 0 }: P
             Reset filters
           </button>
         </div>
-        </div>
+          </div>
+        </details>
       ) : null}
 
       {enabled && loading && !data ? (
@@ -400,65 +484,83 @@ export function OverallRankingPanel({ tenantId, tenantName, refreshSeed = 0 }: P
           role="region"
           aria-label={`Overall beer ranking for ${tenantName}`}
         >
-          <table className="overall-ranking-table">
+          <table
+            className={`overall-ranking-table${visibleColumns.size <= 3 ? ' compact' : ''}`}
+          >
             <caption className="sr-only">
               Overall beer ranking for {tenantName}, across all tastings. Only rows with
               all four criteria count. Scores are out of 100.
             </caption>
             <thead>
               <tr>
-                <SortHeader {...sortHeaderProps} label="#" column="rank" />
-                <SortHeader {...sortHeaderProps} label="Beer" column="name" />
-                <SortHeader {...sortHeaderProps} label="Type" column="style" />
-                <SortHeader {...sortHeaderProps} label="ABV" column="alcohol" numeric />
-                <SortHeader {...sortHeaderProps} label="Smell" column="smell" numeric />
-                <SortHeader {...sortHeaderProps} label="Color" column="color" numeric />
-                <SortHeader
-                  {...sortHeaderProps}
-                  label="Branding"
-                  column="branding"
-                  numeric
-                />
-                <SortHeader {...sortHeaderProps} label="Taste" column="taste" numeric />
-                <SortHeader
-                  {...sortHeaderProps}
-                  label="Score / 100"
-                  column="score"
-                  numeric
-                />
-                <SortHeader {...sortHeaderProps} label="Votes" column="votes" numeric />
-                <SortHeader
-                  {...sortHeaderProps}
-                  label="Tastings"
-                  column="tastings"
-                  numeric
-                />
+                {COLUMN_DEFS.filter((column) => visibleColumns.has(column.key)).map(
+                  (column) => (
+                    <SortHeader
+                      key={column.key}
+                      {...sortHeaderProps}
+                      label={column.label}
+                      column={column.key}
+                      numeric={column.numeric}
+                    />
+                  ),
+                )}
               </tr>
             </thead>
             <tbody>
               {visibleRankings.map((beer) => (
                 <tr key={beer.beerId}>
-                  <td className="rank-cell">#{beer.rank}</td>
-                  <td>
-                    <strong>{beer.name}</strong>
-                    {beer.brewery ? <span className="beer-meta">{beer.brewery}</span> : null}
-                  </td>
-                  <td>{beer.style ?? '—'}</td>
-                  <td className="numeric">
-                    {beer.alcohol === null ? '—' : `${beer.alcohol}%`}
-                  </td>
-                  <td className="numeric">{beer.averageSmell.toFixed(1)}</td>
-                  <td className="numeric">{beer.averageColor.toFixed(1)}</td>
-                  <td className="numeric">{beer.averageBranding.toFixed(1)}</td>
-                  <td className="numeric">{beer.averageTaste.toFixed(1)}</td>
-                  <td className="average-cell">{beer.averageScore.toFixed(1)}</td>
-                  <td className="numeric">
-                    {beer.votes}
-                    {beer.incompleteVotes > 0 ? (
-                      <span className="beer-meta">{beer.incompleteVotes} incomplete</span>
-                    ) : null}
-                  </td>
-                  <td className="numeric">{beer.tastingCount}</td>
+                  {visibleColumns.has('rank') ? (
+                    <td className="rank-cell">#{beer.rank}</td>
+                  ) : null}
+                  {visibleColumns.has('name') ? (
+                    <td>
+                      <button
+                        type="button"
+                        className="beer-name-button"
+                        onClick={() => setSelectedBeer(beer)}
+                        aria-label={`View all ratings for ${beer.name}`}
+                      >
+                        {beer.name}
+                      </button>
+                      {beer.brewery ? (
+                        <span className="beer-meta">{beer.brewery}</span>
+                      ) : null}
+                    </td>
+                  ) : null}
+                  {visibleColumns.has('style') ? <td>{beer.style ?? '—'}</td> : null}
+                  {visibleColumns.has('alcohol') ? (
+                    <td className="numeric">
+                      {beer.alcohol === null ? '—' : `${beer.alcohol}%`}
+                    </td>
+                  ) : null}
+                  {visibleColumns.has('smell') ? (
+                    <td className="numeric">{beer.averageSmell.toFixed(1)}</td>
+                  ) : null}
+                  {visibleColumns.has('color') ? (
+                    <td className="numeric">{beer.averageColor.toFixed(1)}</td>
+                  ) : null}
+                  {visibleColumns.has('branding') ? (
+                    <td className="numeric">{beer.averageBranding.toFixed(1)}</td>
+                  ) : null}
+                  {visibleColumns.has('taste') ? (
+                    <td className="numeric">{beer.averageTaste.toFixed(1)}</td>
+                  ) : null}
+                  {visibleColumns.has('score') ? (
+                    <td className="average-cell">{beer.averageScore.toFixed(1)}</td>
+                  ) : null}
+                  {visibleColumns.has('votes') ? (
+                    <td className="numeric">
+                      {beer.votes}
+                      {beer.incompleteVotes > 0 ? (
+                        <span className="beer-meta">
+                          {beer.incompleteVotes} incomplete
+                        </span>
+                      ) : null}
+                    </td>
+                  ) : null}
+                  {visibleColumns.has('tastings') ? (
+                    <td className="numeric">{beer.tastingCount}</td>
+                  ) : null}
                 </tr>
               ))}
             </tbody>
@@ -488,6 +590,14 @@ export function OverallRankingPanel({ tenantId, tenantName, refreshSeed = 0 }: P
             </button>
           </div>
         </div>
+      ) : null}
+
+      {selectedBeer && data ? (
+        <BeerRatingsDialog
+          beer={selectedBeer}
+          data={data}
+          onClose={() => setSelectedBeer(null)}
+        />
       ) : null}
     </section>
   )

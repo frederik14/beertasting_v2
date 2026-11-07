@@ -73,8 +73,15 @@ node scripts/migrate-legacy-zbl.mjs \
 ## User names
 
 The importer uses the exact `BeerRating.userName` values found in the database.
-It does **not** create users from the Cognito email list and does not create the
-extra renamed/duplicate Cognito identities.
+It does **not** create users from the Cognito list and does not create the extra
+renamed/duplicate Cognito identities.
+
+The importer is locked to tenant **ZBL**
+(`045e449a-4b22-4000-a6c2-fa42350c888e`, name `ZBL`). For that tenant only, it
+can use the old Cognito user pool to resolve old names to email addresses, then
+links matching historical participant rows to existing Supabase profiles with
+that email. It never creates accounts. Use `--no-cognito` to disable this, or
+provide explicit overrides with `--email-map`.
 
 Old database names imported:
 
@@ -89,21 +96,52 @@ Ruben, Fre, Joef, Niels, Tibo, Abé, Gil, Gill, Vince, Michiel, Robin
   Cognito list; they are kept because they have ratings.
 - `Vincent`, `RubenClaessens`, `Rikke.Heremans` and the throwaway email accounts
   are not database `userName`s, so they are ignored.
-- The importer creates **guest participants** (`user_id = null`) by default.
-  Use `--user-map` to link names to current profiles if desired.
-
-Example user map:
+- The importer creates **guest participants** (`user_id = null`) first, then
+  optionally links them to existing profiles. Automatic linking is only enabled
+  for the ZBL tenant. It reads the old Cognito pool by default and matches old
+  names to emails; the SQL then matches those emails against `auth.users`.
+  Participants whose email has no Supabase account stay guests.
+- Use `--user-map` for explicit display-name/user-id overrides. It accepts an
+  optional `email` too:
 
 ```json
 {
-  "Fre": { "displayName": "Fre", "userId": "<new-profile-uuid>" },
-  "Vinny": { "displayName": "Vincent" }
+  "Fre": {
+    "displayName": "Fre",
+    "email": "frederik.vandenbruel@gmail.com"
+  },
+  "Vinny": {
+    "displayName": "Vincent",
+    "userId": "<new-profile-uuid>"
+  }
 }
 ```
 
 ```bash
-node scripts/migrate-legacy-zbl.mjs --user-map .legacy-export/user-map.json
+node scripts/migrate-legacy-zbl.mjs \
+  --user-map .legacy-export/user-map.json \
+  --email-map .legacy-export/name-email-map.json
 ```
+
+`--email-map` is a simple JSON object mapping old names to email addresses and
+overrides the Cognito lookup. `--no-cognito` disables the automatic Cognito
+lookup entirely.
+
+### Current ZBL linkage
+
+The existing ZBL data has since been linked using the same mapping:
+
+| Participant | Linked rows | Supabase account |
+| --- | ---: | --- |
+| Fre | 27 | frederik.vandenbruel@gmail.com (already linked) |
+| Fonne | 47 | gilianvanroosbroeck@hotmail.com |
+| Jarno | 35 | jarno.heremans@hotmail.com |
+| Steven | 46 | steven_goeleven@hotmail.com |
+
+The other historical names still have no Supabase account with the mapped
+Cognito email, so they remain guests. At the time of linking, Jarno's auth
+account was not yet a ZBL member; it needs a group invite before it can see the
+linked ratings.
 
 ## Notes and comments
 
@@ -253,8 +291,10 @@ Open ZBL in the app, check a few tastings, and check the synthetic 2020 ranking.
   tasting so it is not mixed into a specific real tasting's per-tasting results.
 - Imported tastings are completed/read-only. The ZBL owner can reopen one from
   the Tasting panel.
-- Old users are guest participant rows; they are not linked to new auth users
-  unless a `--user-map` is supplied.
+- Old users start as guest participant rows. For ZBL only, the importer can
+  automatically link them to existing Supabase accounts by matching the old
+  Cognito name -> email to `auth.users.email`. Names without a Supabase account
+  with that email remain guests; no accounts are created.
 - Beers are merged by trimmed name into ZBL’s tenant-wide beer catalog. One
   merge conflict (same name, different alcohol/style) was detected; the
   earliest beer’s metadata is used.

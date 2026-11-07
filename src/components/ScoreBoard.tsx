@@ -557,9 +557,9 @@ export function ScoreBoard({
 
   if (snapshot.beers.length === 0 || snapshot.participants.length === 0) {
     return (
-      <section className="panel full-width">
+      <section className="panel full-width score-panel">
         <p className="eyebrow">Scoring</p>
-        <h2>Score each beer per participant</h2>
+        <h2>Rate the beers</h2>
         <p className="empty-state" role="status">
           Add at least one participant and one beer to start scoring.
         </p>
@@ -568,22 +568,25 @@ export function ScoreBoard({
   }
 
   return (
-    <section className="panel full-width">
+    <section className="panel full-width score-panel">
       <div className="panel-header">
         <div>
           <p className="eyebrow">Scoring</p>
-          <h2>Score each beer per participant</h2>
+          <h2>Rate the beers</h2>
         </div>
         <span className="panel-badge">
           {readOnly ? 'Completed · read only' : 'Complete rows are out of 100'}
         </span>
       </div>
 
-      <p className="muted">
-        Smell, color and branding are scored out of 10. Taste is scored out of 20
-        because it counts double. A complete row therefore totals 50, doubled to a
-        final score out of 100.
-      </p>
+      <details className="info-disclosure scoring-help">
+        <summary>How scoring works</summary>
+        <p className="muted">
+          Smell, color and branding are scored out of 10. Taste is scored out of 20
+          because it counts double. A complete row therefore totals 50, doubled to a
+          final score out of 100.
+        </p>
+      </details>
 
       <div className="score-view-toggle" role="group" aria-label="Score view">
         <button
@@ -605,8 +608,8 @@ export function ScoreBoard({
       </div>
 
       {readOnly ? (
-        <p className="muted">
-          This tasting is completed. Reopen it to edit scores.
+        <p className="muted scoring-readonly-note">
+          Completed · read only. Reopen the tasting to edit scores.
         </p>
       ) : null}
 

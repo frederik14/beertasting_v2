@@ -23,17 +23,26 @@ import {
   ListObjectsV2Command,
   S3Client,
 } from '@aws-sdk/client-s3'
+import {
+  CognitoIdentityProviderClient,
+  ListUsersCommand,
+} from '@aws-sdk/client-cognito-identity-provider'
+
+const ZBL_TENANT_ID = '045e449a-4b22-4000-a6c2-fa42350c888e'
+const ZBL_TENANT_NAME = 'ZBL'
 
 const DEFAULTS = {
   bucket: 'front-door-camera',
   prefix: 'AWSDynamoDB/',
   region: 'eu-west-1',
+  cognitoUserPoolId: 'eu-west-1_7jnyLouuH',
   out: '.legacy-export/zbl-legacy-import.sql',
   report: '.legacy-export/zbl-legacy-report.md',
 }
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 
 const args = parseArgs(process.argv.slice(2))
 
@@ -42,17 +51,26 @@ if (args.help) {
   node scripts/migrate-legacy-zbl.mjs [options]
 
 Options:
-  --tenant-id <uuid>       ZBL tenant id (required for a runnable SQL file)
+  --tenant-id <uuid>       Must be the ZBL tenant id (${ZBL_TENANT_ID})
   --host-user-id <uuid>    ZBL owner profile id used as tastings.host_user_id
   --skip-orphans           Do not import the unassigned 2020 ratings
   --synthetic-title <text> Title for the synthetic unassigned tasting
-  --user-map <path>        JSON mapping old userName -> { displayName, userId }
+  --user-map <path>        JSON mapping old userName -> { displayName, userId, email }
+  --email-map <path>       JSON mapping old userName -> email (overrides Cognito)
+  --cognito-user-pool-id <id>
+                           Cognito pool used for automatic name -> email lookup
+                           (default ${DEFAULTS.cognitoUserPoolId})
+  --no-cognito             Disable automatic Cognito name -> email lookup
   --bucket <name>          S3 bucket (default ${DEFAULTS.bucket})
   --prefix <prefix>        S3 prefix (default ${DEFAULTS.prefix})
   --region <region>        AWS region (default ${DEFAULTS.region})
   --out <path>             SQL output (default ${DEFAULTS.out})
   --report <path>          Report output (default ${DEFAULTS.report})
   --help                   This help
+
+This importer is intentionally locked to tenant
+${ZBL_TENANT_NAME} (${ZBL_TENANT_ID}). Name -> email linkage is only
+written for that tenant.
 `)
   process.exit(0)
 }
@@ -61,20 +79,43 @@ const bucket = args.bucket ?? DEFAULTS.bucket
 const prefix = args.prefix ?? DEFAULTS.prefix
 const region = args.region ?? DEFAULTS.region
 const skipOrphans = Boolean(args['skip-orphans'])
-const tenantId = args['tenant-id'] ?? null
+const requestedTenantId = args['tenant-id'] ?? null
 const hostUserId = args['host-user-id'] ?? null
 const outPath = args.out ?? DEFAULTS.out
 const reportPath = args.report ?? DEFAULTS.report
 const syntheticTitleOption = args['synthetic-title'] ?? null
+const cognitoUserPoolId =
+  args['cognito-user-pool-id'] ?? DEFAULTS.cognitoUserPoolId
+const useCognito = !args['no-cognito']
 
-if (tenantId && !UUID_RE.test(tenantId)) {
-  throw new Error(`--tenant-id is not a UUID: ${tenantId}`)
+if (requestedTenantId && !UUID_RE.test(requestedTenantId)) {
+  throw new Error(`--tenant-id is not a UUID: ${requestedTenantId}`)
+}
+if (requestedTenantId && requestedTenantId !== ZBL_TENANT_ID) {
+  throw new Error(
+    `This importer is locked to ${ZBL_TENANT_NAME} (${ZBL_TENANT_ID}); refusing ${requestedTenantId}.`,
+  )
 }
 if (hostUserId && !UUID_RE.test(hostUserId)) {
   throw new Error(`--host-user-id is not a UUID: ${hostUserId}`)
 }
 
+const tenantId = ZBL_TENANT_ID
 const userMap = loadUserMap(args['user-map'])
+const explicitEmailMap = loadEmailMap(args['email-map'])
+const cognitoEmailMap = useCognito
+  ? await loadCognitoNameEmailMap(cognitoUserPoolId, region)
+  : new Map()
+
+const emailByLegacyName = new Map([
+  ...cognitoEmailMap,
+  ...explicitEmailMap,
+])
+for (const [oldName, mapping] of Object.entries(userMap)) {
+  if (mapping.email) {
+    emailByLegacyName.set(nameKey(oldName), mapping.email)
+  }
+}
 
 const s3 = new S3Client({ region })
 const startedAt = new Date().toISOString()
@@ -100,21 +141,101 @@ function parseArgs(argv) {
   return result
 }
 
+function nameKey(value) {
+  return String(value ?? '')
+    .trim()
+    .toLowerCase()
+}
+
+function validEmail(value, source) {
+  const email = String(value ?? '').trim()
+  if (!EMAIL_RE.test(email)) {
+    throw new Error(`Invalid email in ${source}: ${value}`)
+  }
+  return email
+}
+
 function loadUserMap(path) {
   if (!path) return {}
   const raw = JSON.parse(readFileSync(path, 'utf8'))
   const normalized = {}
   for (const [oldName, value] of Object.entries(raw)) {
     if (typeof value === 'string') {
-      normalized[oldName] = { displayName: value, userId: null }
+      normalized[oldName] = { displayName: value, userId: null, email: null }
     } else {
       normalized[oldName] = {
         displayName: value.displayName ?? oldName,
         userId: value.userId ?? null,
+        email: value.email ? validEmail(value.email, `--user-map ${oldName}`) : null,
       }
     }
   }
   return normalized
+}
+
+function loadEmailMap(path) {
+  if (!path) return new Map()
+  const raw = JSON.parse(readFileSync(path, 'utf8'))
+  const map = new Map()
+  for (const [oldName, email] of Object.entries(raw)) {
+    map.set(nameKey(oldName), validEmail(email, `--email-map ${oldName}`))
+  }
+  return map
+}
+
+async function loadCognitoNameEmailMap(userPoolId, awsRegion) {
+  const client = new CognitoIdentityProviderClient({ region: awsRegion })
+  const map = new Map()
+  let paginationToken
+
+  try {
+    do {
+      const response = await client.send(
+        new ListUsersCommand({
+          UserPoolId: userPoolId,
+          Limit: 60,
+          ...(paginationToken ? { PaginationToken: paginationToken } : {}),
+        }),
+      )
+
+      for (const user of response.Users ?? []) {
+        const attributes = Object.fromEntries(
+          (user.Attributes ?? []).map((attribute) => [
+            attribute.Name,
+            attribute.Value,
+          ]),
+        )
+        const email = attributes.email
+          ? validEmail(attributes.email, `Cognito user ${user.Username}`)
+          : null
+        if (!email) continue
+
+        for (const name of [
+          user.Username,
+          attributes.name,
+          attributes['custom:name'],
+        ]) {
+          if (!name) continue
+          const key = nameKey(name)
+          const existing = map.get(key)
+          if (existing && existing.toLowerCase() !== email.toLowerCase()) {
+            throw new Error(
+              `Cognito has conflicting emails for ${name}: ${existing} and ${email}`,
+            )
+          }
+          map.set(key, email)
+        }
+      }
+
+      paginationToken = response.PaginationToken
+    } while (paginationToken)
+  } catch (error) {
+    throw new Error(
+      `Could not load automatic ZBL name -> email mapping from Cognito pool ${userPoolId}: ${error.message}. Pass --no-cognito or --email-map to override.`,
+    )
+  }
+
+  return map
 }
 
 function unmarshal(value) {
@@ -597,6 +718,7 @@ const allRatings = skipOrphans
 
 const participantByKey = new Map()
 const participantByUserKey = new Map()
+const emailByDisplayName = new Map()
 const participants = []
 const scoreByKey = new Map()
 const scores = []
@@ -610,6 +732,22 @@ function participantFor(tasting, rawUserName) {
     stats.longParticipantNamesTruncated++
   }
   const userId = mapping?.userId ?? null
+  const mappedEmail =
+    mapping?.email ?? emailByLegacyName.get(nameKey(rawUserName)) ?? null
+
+  if (!userId && mappedEmail) {
+    const key = nameKey(displayName)
+    const existing = emailByDisplayName.get(key)
+    if (
+      existing &&
+      existing.email.toLowerCase() !== mappedEmail.toLowerCase()
+    ) {
+      throw new Error(
+        `Email mapping conflict for participant ${displayName}: ${existing.email} and ${mappedEmail}`,
+      )
+    }
+    emailByDisplayName.set(key, { displayName, email: mappedEmail })
+  }
 
   const key = `${tasting.id}|${displayName}`
   let participant = participantByKey.get(key)
@@ -706,11 +844,18 @@ for (const score of scoreByKey.values()) {
   scores.push(score)
 }
 
+const participantNameKeys = new Set(
+  participants.map((participant) => nameKey(participant.displayName)),
+)
+const emailLinkRows = [...emailByDisplayName.values()]
+  .filter((link) => participantNameKeys.has(nameKey(link.displayName)))
+  .sort((a, b) => a.displayName.localeCompare(b.displayName))
+
 // ---------------------------------------------------------------------------
 // SQL generation
 // ---------------------------------------------------------------------------
 
-const tenantLabel = tenantId ?? 'auto: tenant named/slugged ZBL'
+const tenantLabel = `${ZBL_TENANT_NAME} (${ZBL_TENANT_ID})`
 const hostLabel = hostUserId ?? 'auto: first ZBL owner'
 
 function insertMany(table, columns, rows, chunkSize = 400) {
@@ -757,28 +902,17 @@ set local statement_timeout = '10min';
 
 do $$
 declare
-  v_tenant uuid;
+  v_tenant uuid := ${q(tenantId)}::uuid;
   v_host uuid;
-  v_count integer;
+  v_linked integer;
 begin
-  v_tenant := ${tenantId ? `${q(tenantId)}::uuid` : 'null'};
-
-  if v_tenant is null then
-    select count(*) into v_count
+  if not exists (
+    select 1
     from public.tenants
-    where lower(trim(name)) = 'zbl' or lower(trim(slug)) = 'zbl';
-
-    if v_count <> 1 then
-      raise exception 'Expected exactly one tenant named or slugged ZBL, found %. Pass --tenant-id if needed.', v_count;
-    end if;
-
-    select id into v_tenant
-    from public.tenants
-    where lower(trim(name)) = 'zbl' or lower(trim(slug)) = 'zbl';
-  end if;
-
-  if not exists (select 1 from public.tenants where id = v_tenant) then
-    raise exception 'Tenant not found: %', v_tenant;
+    where id = v_tenant
+      and lower(trim(name)) = 'zbl'
+  ) then
+    raise exception 'ZBL tenant % with name ZBL not found.', v_tenant;
   end if;
 
   v_host := ${hostUserId ? `${q(hostUserId)}::uuid` : 'null'};
@@ -885,6 +1019,35 @@ sqlParts.push(
     ]),
   ),
 )
+
+if (emailLinkRows.length > 0) {
+  sqlParts.push(`-- ZBL-only automatic name -> email linkage.
+with zbl_email_map(display_name, email) as (
+  values
+    ${emailLinkRows
+      .map((link) => `(${q(link.displayName)}, ${q(link.email)})`)
+      .join(',\n    ')}
+)
+update public.tasting_participants p
+set user_id = u.id
+from public.tastings t, public.profiles pr, auth.users u, zbl_email_map m
+where p.tasting_id = t.id
+  and t.tenant_id = v_tenant
+  and lower(btrim(p.display_name)) = lower(btrim(m.display_name))
+  and lower(btrim(u.email)) = lower(btrim(m.email))
+  and pr.id = u.id
+  and p.user_id is null
+  and not exists (
+    select 1
+    from public.tasting_participants p2
+    where p2.tasting_id = p.tasting_id
+      and p2.user_id = u.id
+      and p2.id <> p.id
+  );
+get diagnostics v_linked = row_count;
+raise notice 'Linked % ZBL participant row(s) by name -> email mapping.', v_linked;
+`)
+}
 
 sqlParts.push(
   insertMany(
@@ -1006,8 +1169,10 @@ ${stats.mergeConflictDetails.map((item) => `- **${item.name}**: alcohol ${item.a
 
 ## Old usernames found in the database
 
-These are the exact \`BeerRating.userName\` values. No Cognito emails or extra
-accounts are created. Names not present in the old ratings are ignored.
+These are the exact \`BeerRating.userName\` values. Cognito is used only to
+resolve an optional name -> email link for existing Supabase profiles; no auth
+accounts are created from the Cognito list. Names not present in the old
+ratings are ignored.
 
 | Old userName | Total ratings | Linked | 2020 orphan |
 | --- | ---: | ---: | ---: |
@@ -1015,14 +1180,36 @@ ${userLines.join('\n')}
 
 ${Object.keys(userMap).length ? `\nUser mapping applied: ${JSON.stringify(userMap, null, 2)}\n` : ''}
 
+## Automatic ZBL name -> email mapping
+
+Source: ${
+    useCognito
+      ? `Cognito pool \`${cognitoUserPoolId}\``
+      : 'Cognito disabled (`--no-cognito`)'
+  }${explicitEmailMap.size ? ', plus explicit `--email-map` overrides' : ''}.
+
+This linkage is generated only for **${ZBL_TENANT_NAME}**
+(\`${ZBL_TENANT_ID}\`). The SQL matches participant display names to
+\`auth.users.email\`, skips participants that are already linked, and skips a
+row when linking it would violate the one-user-per-tasting constraint.
+
+${
+  emailLinkRows.length
+    ? `| Participant name | Email |
+| --- | --- |
+${emailLinkRows.map((link) => `| ${link.displayName} | ${link.email} |`).join('\n')}`
+    : 'No name -> email links were generated.'
+}
+
 ## Tenant and host resolution
 
 - Tenant: ${tenantLabel}
 - Host profile: ${hostLabel}
 
-The SQL resolves the tenant by name/slug \`ZBL\` (or uses the explicit
-\`--tenant-id\`) and uses the first owner membership as \`tastings.host_user_id\`.
-It aborts if ZBL is missing, has no owner, or already contains tastings/beers.
+The importer is locked to the **ZBL** tenant id above and verifies both the id
+and the tenant name before inserting anything. It uses the first owner
+membership as \`tastings.host_user_id\`. It aborts if ZBL is missing, has no
+owner, or already contains tastings/beers.
 
 ## Output
 

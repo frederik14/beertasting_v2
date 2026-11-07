@@ -15,12 +15,15 @@ export function useTenantRanking(
   tenantId: string | null,
   refreshSeed = 0,
   enabled = true,
+  active = true,
 ) {
   const [data, setData] = useState<TenantRankingData | null>(null)
   const [loading, setLoading] = useState(Boolean(tenantId) && enabled)
   const [error, setError] = useState<string | null>(null)
   const requestId = useRef(0)
   const loadedTenantIdRef = useRef<string | null>(null)
+  const lastSeedRef = useRef(refreshSeed)
+  const pendingRefreshRef = useRef(false)
 
   const refresh = useCallback(
     async (options?: { silent?: boolean }) => {
@@ -63,6 +66,7 @@ export function useTenantRanking(
     [tenantId],
   )
 
+  // First load for a group, or the first time the ranking view is opened.
   useEffect(() => {
     if (!enabled) return
 
@@ -73,7 +77,29 @@ export function useTenantRanking(
     }
 
     void refresh()
-  }, [enabled, tenantId, refreshSeed, refresh])
+  }, [enabled, tenantId, refresh])
+
+  // The app bumps refreshSeed after writes. Do not refetch while the ranking
+  // view is hidden; remember that it is stale and refresh when it becomes
+  // active again.
+  useEffect(() => {
+    if (lastSeedRef.current === refreshSeed) return
+    lastSeedRef.current = refreshSeed
+
+    if (!enabled) return
+    if (!active) {
+      pendingRefreshRef.current = true
+      return
+    }
+
+    void refresh()
+  }, [active, enabled, refreshSeed, refresh])
+
+  useEffect(() => {
+    if (!enabled || !active || !pendingRefreshRef.current) return
+    pendingRefreshRef.current = false
+    void refresh()
+  }, [active, enabled, refresh])
 
   return {
     data,

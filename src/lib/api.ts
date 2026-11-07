@@ -436,6 +436,26 @@ export async function addParticipant(
   }
 }
 
+export async function renameParticipant(
+  client: AppSupabaseClient,
+  participantId: string,
+  displayName: string,
+): Promise<void> {
+  const name = displayName.trim()
+  if (!name) {
+    throw new Error('Participant name is required.')
+  }
+
+  const { error } = await client
+    .from('tasting_participants')
+    .update({ display_name: name })
+    .eq('id', participantId)
+
+  if (error) {
+    throw new Error(formatError(error))
+  }
+}
+
 export async function removeParticipant(
   client: AppSupabaseClient,
   participantId: string,

@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { useTenantRanking } from '../hooks/useTenantRanking'
 import type { TenantRankingData, TenantRankingScore } from '../lib/types'
@@ -6,7 +6,10 @@ import { OverallRankingPanel } from './OverallRankingPanel'
 
 vi.mock('../hooks/useTenantRanking')
 
-afterEach(cleanup)
+afterEach(() => {
+  cleanup()
+  vi.unstubAllGlobals()
+})
 
 const score = (
   tastingId: string,
@@ -99,5 +102,44 @@ describe('OverallRankingPanel', () => {
     })
 
     expect(screen.getByText('No complete scores match these filters.')).toBeTruthy()
+  })
+
+  it('defaults to rank, beer and score columns on a phone viewport', () => {
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn(() => ({
+        matches: true,
+        media: '(max-width: 760px)',
+        onchange: null,
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      })),
+    )
+
+    renderPanel()
+
+    expect(screen.getByRole('columnheader', { name: '#' })).toBeTruthy()
+    expect(screen.getByRole('columnheader', { name: 'Beer' })).toBeTruthy()
+    expect(screen.getByRole('columnheader', { name: 'Score / 100' })).toBeTruthy()
+    expect(screen.queryByRole('columnheader', { name: 'Type' })).toBeNull()
+  })
+
+  it('opens a sortable detail table when a beer name is clicked', () => {
+    renderPanel()
+
+    fireEvent.click(
+      screen.getByRole('button', { name: 'View all ratings for Beer One' }),
+    )
+
+    const dialog = screen.getByRole('dialog')
+    expect(within(dialog).getByRole('heading', { name: 'Beer One' })).toBeTruthy()
+    expect(within(dialog).getByText('Alice')).toBeTruthy()
+    expect(within(dialog).getByText('Bob')).toBeTruthy()
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Close ratings' }))
+    expect(screen.queryByRole('dialog')).toBeNull()
   })
 })

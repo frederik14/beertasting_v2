@@ -34,6 +34,21 @@ Realtime.
   reconnect/visibility changes.
 - The Scoring panel has a phone-friendly **My ratings** view (one card per beer
   for the signed-in participant) and an **All ratings** matrix view.
+- The app is split into **Tasting**, **Ranking** and **Group** views. Views stay
+  mounted while hidden, so score drafts, ranking filters and loaded ranking data
+  survive tab switches without refetching.
+- The **Tasting** view opens with a compact current-tasting selector and the
+  scoring panel, so rating is the first action. The latest tasting is selected
+  by default and the selector changes to any other tasting.
+- On phones the current-tasting selector collapses to a single dropdown row, and
+  the scoring panel hides the explanatory box, badge and ratings-summary header
+  so the first beer card appears sooner.
+- Adding or managing tastings lives in the **Group** view behind a collapsed
+  **Add or manage tastings** section.
+- On phones the view navigation, group switcher, role and sign-out live in a
+  hamburger menu to keep the limited vertical space for content. Long scoring
+  and ranking explanations are collapsed behind **How … works** toggles, and
+  the overall-ranking filters are behind a **Filters** toggle.
 
 ## Rating from multiple phones
 
@@ -48,7 +63,9 @@ to pass a device around.
    - under **Create or join another group** if they already belong to one.
 4. They open the tasting.
 5. In the **Participants** panel they choose **Add me**. This links their auth
-   account to their own participant row.
+   account to their own participant row. If the account is already linked
+   (for example the host row is named with the account email), use **Rename** on
+   that linked row to set the display name you want in this tasting.
 6. In **Scoring** they use **My ratings** (the default view) and score each
    beer. If they have not added themselves yet, this view links to the
    Participants panel. The full **All ratings** matrix is still available, but other
@@ -314,7 +331,12 @@ in the selected group:
   distinct tastings that contributed a complete row.
 - Filters by tasting date, taster, type and name/brewery/type search are applied
   row by row before aggregation. Date filters use `tastings.tasting_date`.
+- **Filters & columns** lets each person choose which table columns are shown.
+  Phones default to rank, beer and score; desktop defaults to all columns. The
+  choice stays in memory while switching views.
 - Headers sort the visible table; the rank numbers stay based on the score.
+- Click a beer name to open all complete ratings for that beer in a sortable
+  table with taster, tasting, per-criterion scores and total.
 - The panel has a **Refresh** button. It also refreshes after the signed-in
   user saves scores or changes participants, beers or tastings. Other people's
   changes are picked up on refresh, matching the old app's ranking workflow.
@@ -335,8 +357,10 @@ what is rendered:
 
 - **My ratings** and **All ratings** page by 12 beers. Drafts and unsaved changes
   are kept across pages, so saving still covers every dirty row.
-- The **Overall beer ranking** loads only when it is scrolled into view, and
-  initially renders 50 beers. Use **Show 50 more** or **Show all** to expand it.
+- The **Overall beer ranking** loads on the first visit to the **Ranking** view,
+  and initially renders 50 beers. Use **Show 50 more** or **Show all** to expand
+  it. The view stays mounted afterwards, so switching tabs keeps the data and
+  filters in memory.
 - Tenant-wide ranking data is fetched in pages because PostgREST caps a single
   response at 1,000 rows by default.
 - The mobile sticky save bar uses a solid background rather than a backdrop

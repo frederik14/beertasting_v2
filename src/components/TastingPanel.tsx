@@ -108,31 +108,29 @@ export function TastingPanel({
   }
 
   return (
-    <section className="panel full-width">
-      <div className="panel-header">
-        <div>
-          <p className="eyebrow">Tasting setup</p>
-          <h2>Tastings</h2>
-        </div>
+    <details className="panel full-width manage-tastings">
+      <summary>
+        <span>Add or manage tastings</span>
         {selectedTasting ? (
           <span className={`status-badge status-${selectedTasting.status}`}>
             {statusLabel[selectedTasting.status]}
           </span>
         ) : null}
-      </div>
+      </summary>
 
-      {error ? (
-        <StatusBanner tone="error" onDismiss={() => setError(null)}>
-          {error}
-        </StatusBanner>
-      ) : null}
-      {message ? (
-        <StatusBanner tone="success" onDismiss={() => setMessage(null)}>
-          {message}
-        </StatusBanner>
-      ) : null}
+      <div className="manage-tastings-body">
+        {error ? (
+          <StatusBanner tone="error" onDismiss={() => setError(null)}>
+            {error}
+          </StatusBanner>
+        ) : null}
+        {message ? (
+          <StatusBanner tone="success" onDismiss={() => setMessage(null)}>
+            {message}
+          </StatusBanner>
+        ) : null}
 
-      <div className="tasting-grid">
+        <div className="tasting-grid">
         <div>
           <h3>Create a tasting</h3>
           <form className="stacked-form" onSubmit={handleCreate}>
@@ -248,6 +246,7 @@ export function TastingPanel({
           )}
         </div>
       </div>
-    </section>
+      </div>
+    </details>
   )
 }

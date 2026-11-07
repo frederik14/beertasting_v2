@@ -38,7 +38,7 @@ export function SnapshotSummary({
   lastError,
 }: Props) {
   return (
-    <section className="panel">
+    <section className="panel full-width">
       <div className="panel-header">
         <div>
           <p className="eyebrow">Current tasting</p>
